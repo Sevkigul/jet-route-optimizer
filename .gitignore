@@ -1,0 +1,20 @@
+# Veri ve ciktilar
+data/raw/*
+data/processed/*
+outputs/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!outputs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+venv/
+.venv/
+env/
+
+# Isletim sistemi / editor
+.DS_Store
+.vscode/
+.idea/
