@@ -1,19 +1,17 @@
-"""Yardimci fonksiyonlar - eksik koordinat tamamlama ve mesafe matrisi uretimi."""
+"""Yardimci fonksiyonlar - eksik koordinat tamamlama ve mesafe matrisi üretimi."""
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
 
-# Koordinatlar.xlsx'te eksik olan merkezler. Ham veri DEGISTIRILMEZ;
-# eksik koordinatlar burada, kod tarafinda tamamlanir.
+# Koordinatlar.xlsx'te eksik olan merkezler.
 EKSIK_KOORDINAT = {
-    "Kocaeli": (40.7655, 29.9408),  # Izmit sehir merkezi
+    "Kocaeli": (40.7655, 29.9408),  
 }
 
-
 def get_coordinates(data):
-    """Koordinat tablosunu doner; eksik merkezleri EKSIK_KOORDINAT'tan tamamlar."""
+    """Koordinat tablosunu döner; eksik merkezleri EKSIK_KOORDINAT'tan tamamlar."""
     coords = data["koordinat"].copy()
     mevcut = set(coords["center"])
     eklenecek = [
@@ -26,18 +24,16 @@ def get_coordinates(data):
         print(f"Koordinata elle eklendi: {[e['center'] for e in eklenecek]}")
     return coords
 
-
 def haversine(lat1, lon1, lat2, lon2):
-    """Iki nokta arasi buyuk-cember mesafesi (km)."""
+
     R = 6371.0  # Dunya yaricapi (km)
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
     dlat, dlon = lat2 - lat1, lon2 - lon1
     a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     return R * 2 * np.arcsin(np.sqrt(a))
 
-
 def build_distance_matrix(coords, save=True):
-    """Tum merkez ciftleri arasi mesafe matrisi (km) uretir."""
+    """Tum merkez çiftleri arasi mesafe matrisi (km) uretir."""
     centers = coords["center"].tolist()
     lat = coords.set_index("center")["lat"]
     lon = coords.set_index("center")["lon"]

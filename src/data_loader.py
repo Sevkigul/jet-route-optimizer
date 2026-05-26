@@ -43,7 +43,7 @@ RENAME = {
 
 
 def _clean_text(df):
-    """Metin sutunlarindaki bas/son bosluklari temizler."""
+    """Metin sütunlarindaki bas/son boşluklari temizler."""
     for col in df.columns:
         if df[col].dtype == "object" or str(df[col].dtype).startswith("str"):
             df[col] = df[col].astype(str).str.strip()
@@ -51,7 +51,7 @@ def _clean_text(df):
 
 
 def load_data(raw_dir=RAW_DIR):
-    """4 Excel dosyasini yukler, standart sutun adlariyla dict dondurur."""
+    """4 Excel dosyasini yukler, standart sütun adlariyla dict döndürür."""
     raw_dir = Path(raw_dir)
     data = {}
     for key, fname in FILES.items():
@@ -67,7 +67,7 @@ def load_data(raw_dir=RAW_DIR):
 
 
 def check_coverage(data):
-    """Desi ve Kiralik merkezlerinin Koordinatlar'da var olup olmadigini kontrol eder."""
+    """Desi ve Kiralik merkezlerinin Koordinatlar'da var olup olmadiğini kontrol eder."""
     centers = set(data["koordinat"]["center"])
     desi_centers = set(data["desi"]["origin"]) | set(data["desi"]["destination"])
     kiralik_centers = set(data["kiralik"]["origin"]) | set(data["kiralik"]["destination"])
