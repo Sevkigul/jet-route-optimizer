@@ -1,4 +1,4 @@
-"""Ozellik uretimi - panel dengeleme ve tahmin özellikleri."""
+"""Ozellik uretimi - panel dengeleme ve tahmin ozellikleri (Faz 2)."""
 import numpy as np
 import pandas as pd
 
@@ -14,12 +14,21 @@ TAHMIN_SON = pd.Timestamp("2026-05-17")
 LAG_GUNLER = [7, 14, 21]
 ROLLING_PENCERE = [7, 28]
 
+# 2026 resmi tatilleri (egitim donemi + cevresi); talep bu gunlerde belirgin duser
+RESMI_TATILLER = pd.to_datetime([
+    "2026-01-01",                              # yilbasi
+    "2026-03-20", "2026-03-21", "2026-03-22",  # Ramazan Bayrami
+    "2026-04-23",                              # Ulusal Egemenlik
+    "2026-05-01",                              # Emek ve Dayanisma
+    "2026-05-19",                              # Ataturk'u Anma
+])
+
 
 def build_panel(data):
-    """Dengeli panel kurar: her güzergah x her gün tek satir.
+    """Dengeli panel kurar: her guzergah x her gun tek satir.
 
-    - 1 Oca - 9 May : gerçek veri; teslimat olmayan gün-güzergah = 0 (zero-fill)
-    - 10 May        : bozuk/eksik gün, desi = NaN (egitime girmez)
+    - 1 Oca - 9 May : gercek veri; teslimat olmayan gun-guzergah = 0 (zero-fill)
+    - 10 May        : bozuk/eksik gun, desi = NaN (egitime girmez)
     - 11-17 May     : tahmin hedefi, desi = NaN
     Tarih ekseni kesintisiz tutulur; boylece gecikme hesabi takvimle hizali kalir.
     """
@@ -50,6 +59,7 @@ def add_features(panel):
     df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
     df["month"] = df["date"].dt.month
     df["day"] = df["date"].dt.day
+    df["is_holiday"] = df["date"].isin(RESMI_TATILLER).astype(int)
 
     # --- Gecikme ozellikleri (hepsi >= 7 gun, sizinti yok) ---
     grup = df.groupby(["origin", "destination"])["desi"]
@@ -83,8 +93,8 @@ if __name__ == "__main__":
           panel[["origin", "destination"]].drop_duplicates().shape[0])
 
     feat = add_features(panel)
-    print("\nÖzellikli panel   :", feat.shape)
-    print("Sütunlar          :", list(feat.columns))
+    print("\nOzellikli panel   :", feat.shape)
+    print("Sutunlar          :", list(feat.columns))
 
     egitim = feat[feat["desi"].notna()]
     tahmin = feat[(feat["date"] >= TAHMIN_BASLANGIC)

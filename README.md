@@ -61,8 +61,11 @@ python src/optimize.py    # araç planı     -> outputs/arac_plani.xlsx
 
 ### Talep tahmini
 
-Geçmiş 130 günlük (1 Ocak 2026 – 10 Mayıs 2026) güzergah-gün bazlı desi verisiyle
-**LightGBM** modeli eğitilir ve 11–17 Mayıs için günlük tahmin üretilir.
+Geçmiş 130 günlük (1 Oca – 10 May 2026) güzergah-gün bazlı desi verisiyle
+**LightGBM + CatBoost** ikilisi eğitilir; iki modelin ortalaması 11–17 Mayıs
+için günlük tahmini üretir (iki bağımsız kütüphanenin harmanı, hata
+çeşitliliğini azaltarak tüm doğrulama katmanlarında tekil modellerden daha
+iyi sonuç vermiştir).
 
 Öne çıkan tasarım kararları:
 
@@ -70,47 +73,74 @@ Geçmiş 130 günlük (1 Ocak 2026 – 10 Mayıs 2026) güzergah-gün bazlı des
   olmayan gün-güzergahlar `0 desi` ile doldurulur (sıfır talep, eksik veri değil).
 - **Sızıntısız özellikler:** Tahmin haftasında yakın geçmiş bulunmayacağından
   tüm gecikme (lag) özellikleri en az 7 günlüktür.
-- **Log dönüşümü:** Sağa çarpık talep dağılımı için hedef `log1p` ile dönüştürülür.
+- **Tweedie hedef fonksiyonu:** Sıfır-yoğun ve sağa çarpık talep dağılımı
+  LightGBM'in `tweedie` objective'i ile modellenir; log dönüşümlü
+  regresyonun yarattığı sistematik eksik tahmin sapması (gerçek haftalık
+  hacmin ~%26 altı) bu sayede giderilmiştir.
+- **Resmi tatil özelliği:** 23 Nisan, 1 Mayıs gibi tatillerde talep belirgin
+  düştüğünden takvime tatil işareti eklenmiştir; doğrulama hatasını en çok
+  düşüren tek değişiklik budur.
 - **Doğrulama:** Tek pencere yanıltıcı olabildiğinden model 3 ayrı zaman-katmanında
-  test edilmiştir.
+  test edilmiştir. Ortalama **WMAPE ≈ %26** (katmanlar: 22.5 / 37.0 / 19.4).
+  Tahmin başarısı değerlendirme kriterlerinden biri olduğundan kasıtlı
+  düşük/yüksek tahminden kaçınılmış; son doğrulama haftasında model,
+  gerçekleşen toplam hacmi %11 sapmayla yakalamaktadır.
 
-**Doğrulama sonucu:** ortalama **WMAPE ≈ %47** (güzergah-gün granülerliğinde,
-yüksek varyanslı talep için makul bir aralık).
+Çıktı formatı (`talep_tahmini.xlsx`): `Tarih | Çıkış TM | Varış TM | Tahmin Edilen Desi`
 
 ### Araç optimizasyonu
 
 Tahmin edilen talep, her gün her güzergah için doğrudan (konsolidasyonsuz)
 araçlara atanır:
 
-- Önce sabit **kiralık filo** kapasitesi doldurulur (batık maliyet).
-- Kalan yük, 4 araç tipi (Tır, Kamyon, Hafif Kamyon, Kamyonet) üzerinden
-  **tamsayılı programlama (MIP)** ile en ucuz **spot** kombinasyonuna atanır.
-  Çözücü: PuLP / CBC.
-- Spot maliyet = araç sayısı × (spot sabit günlük + spot km × mesafe).
+- **Kiralık filo zorunlu ve önceliklidir:** Tanımlı kiralık araçlar, doluluk
+  oranından bağımsız olarak her gün yola çıkar; kira + km maliyetleri her
+  koşulda toplam maliyete dahildir.
+- Kiralık kapasiteyi aşan yük, 4 araç tipi (Tır, Kamyon, Hafif Kamyon,
+  Kamyonet) üzerinden **tamsayılı programlama (MIP)** ile en ucuz **spot**
+  kombinasyonuna atanır. Çözücü: PuLP / CBC.
+- **Minimum doluluk kısıtı:** Spot araçlar yalnızca kapasitelerinin en az
+  %10'u dolu olacaksa plana eklenir (kiralık araçlar bu kısıttan muaftır).
+- **Uğrama (multi-stop):** Yol üstündeki bir merkezin yükü, rotası uygun bir
+  spot araca bindirilir (yük araçta kalır, aktarma yapılmaz — konsolidasyon
+  değildir). Araç başına en fazla bir uğrama yapılır, sapma doğrudan
+  mesafenin %15'ini aşamaz ve kapasite/doluluk kısıtları korunur. Yalnızca
+  net tasarruf sağlayan birleşmeler uygulanır.
+- Araç dönüşleri kapsam dışıdır; plan tek yönlüdür ve her gün bağımsız
+  değerlendirilir.
+- Maliyet = günlük sabit + km × mesafe (kuş uçuşu / Haversine).
+
+Çıktı formatı (`arac_plani.xlsx`): her satır tek bir araç ataması —
+`Tarih | Araç Tipi | Çıkış TM | Varış TM | Atanan Desi | Maliyet | Uğrama`
+(Uğrama sütunu yalnızca uğrama yapan araçlarda doludur; ek bilgi niteliğindedir.)
 
 ---
 
 ## Sonuç
 
-11–17 Mayıs haftası için bulunan maliyet:
+11–17 Mayıs haftası için bulunan maliyet (kiralık kira + km ve spot
+günlük + km dahil):
 
 | Bileşen | Tutar (TL) |
 |---|---|
-| Spot araç (değişken) | 9.195.279 |
-| Kiralık filo (sabit) | 802.744 |
-| **Toplam maliyet** | **9.998.023** |
-
-> Raporlanan ana değer kiralık ve spot maliyetlerin toplamıdır. Yalnızca değişken
-> maliyet baz alınırsa spot toplamı geçerlidir.
+| Kiralık filo (kira + km) | 802.744 |
+| Spot araçlar | 8.730.674 |
+| **Toplam maliyet** | **9.533.417** |
 
 ---
 
 ## Notlar ve kapsam
 
-- Bu teslimde **konsolidasyon kapsam dışıdır**; güzergahlar doğrudan servis edilir.
-- Mesafeler Haversine ile hesaplanmıştır.
-- Tahmin için XGBoost ensemble denenmiş; doğrulama LightGBM lehine sonuç
-  verdiğinden tek model kullanılmıştır.
-- Kiralık filo varsayılan olarak yönlü (tek yön) modellenmiştir.
+- Bu teslimde **konsolidasyon kapsam dışıdır**: yükler ara merkezde
+  indirilip birleştirilmez. Serbest bırakılan **uğrama** (multi-stop) ise
+  kullanılmıştır; uğramada yük aynı araçta kalır ve araç son varışına devam
+  eder. `optimize.py` içindeki `UGRAMA_AKTIF = False` ile bu katman
+  kapatılabilir (kapalıyken toplam maliyet 10.879.942 TL'dir).
+- Mesafeler Haversine (kuş uçuşu) ile hesaplanmıştır.
+- Tahmin için XGBoost da denenmiş; doğrulamada LightGBM ve CatBoost'un
+  gerisinde kaldığından nihai harmana (ensemble) bu iki model alınmıştır.
+- SLA cezası, TM kapasiteleri, sefer süreleri ve şoför kısıtları bu aşamada
+  veri setinde tanımlı olmadığından modele dahil edilmemiştir.
 - İleri aşama hedefleri (stokastik optimizasyon, konsolidasyon, belirsizlik
-  modellemesi) ön tasarım raporunda yer almakta olup bu teslimin kapsamı dışındadır.
+  modellemesi) ön tasarım raporunda yer almakta olup bu teslimin kapsamı
+  dışındadır.
