@@ -53,6 +53,7 @@ CAT_PARAMS = {
     "iterations": 300,
     "random_seed": 42,
     "verbose": 0,
+    "allow_writing_files": False,  # catboost_info/ log klasoru olusturulmasin
 }
 
 

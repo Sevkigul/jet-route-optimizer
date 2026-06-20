@@ -3,6 +3,7 @@ numpy>=1.26
 openpyxl>=3.1
 scikit-learn>=1.4
 lightgbm>=4.3
+catboost>=1.2
 pulp>=2.8
 matplotlib>=3.8
 ipykernel>=6.29

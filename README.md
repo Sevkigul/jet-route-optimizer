@@ -61,7 +61,7 @@ python src/optimize.py    # araç planı     -> outputs/arac_plani.xlsx
 
 ### Talep tahmini
 
-Geçmiş 130 günlük (1 Oca – 10 May 2026) güzergah-gün bazlı desi verisiyle
+Geçmiş 130 günlük (1 Ocak 2026 – 10 Mayis 2026) güzergah-gün bazlı desi verisiyle
 **LightGBM + CatBoost** ikilisi eğitilir; iki modelin ortalaması 11–17 Mayıs
 için günlük tahmini üretir (iki bağımsız kütüphanenin harmanı, hata
 çeşitliliğini azaltarak tüm doğrulama katmanlarında tekil modellerden daha
