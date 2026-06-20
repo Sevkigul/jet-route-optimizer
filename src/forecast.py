@@ -138,6 +138,7 @@ def run_forecast():
     # Resmi teslim formati: Tarih | Çıkış TM | Varış TM | Tahmin Edilen Desi
     cikti = tahmin_seti[["date", "origin", "destination", "tahmin"]].copy()
     cikti.columns = ["Tarih", "Çıkış TM", "Varış TM", "Tahmin Edilen Desi"]
+    cikti["Tarih"] = cikti["Tarih"].dt.strftime("%Y-%m-%d") 
     cikti["Tahmin Edilen Desi"] = cikti["Tahmin Edilen Desi"].round(2)
     cikti = cikti.sort_values(["Tarih", "Çıkış TM",
                                "Varış TM"]).reset_index(drop=True)

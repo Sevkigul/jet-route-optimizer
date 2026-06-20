@@ -265,6 +265,7 @@ def run_optimization(tahmin, mesafe, kiral, kap):
     df = pd.DataFrame(rows)
     if UGRAMA_AKTIF:
         df = ugrama_iyilestirme(df, mesafe, capacity, spot_km)
+        df.drop(columns=["Uğrama"], inplace=True, errors="ignore")
     else:
         df["Uğrama"] = ""
 
