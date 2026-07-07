@@ -1,0 +1,117 @@
+"""Kiralik arac zorunlu gunluk sevkiyati.
+
+Politika: kiralik filo, gunun 09:00 VE 17:00 dalgalarini birlikte (17:00
+elleclemesi tamamlandiktan sonra tek seferde) tasir - "gec cikis" politikasi.
+
+Gerekce: leftover_gec = max(0, toplam_talep - kapasite) her zaman
+leftover_erken = max(0, talep_0900 - kapasite) + talep_1700'den kucuk esittir
+(kanit: erken politikada 17:00 talebinin tamami spot'a kaliyor, gec politikada
+ise sadece kapasiteyi asan kisim kaliyor). Yani gec politika spot ihtiyacini
+hic bir zaman erken politikadan fazla yapmiyor, cogu zaman daha az yapiyor.
+Tek bedeli: 09:00 yukunun ~8 saat gec cikmasi - bu gecikme genel SLA hesabina
+(costs.sla_penalty) zaten dahil edildigi icin gozden kacmiyor, sadece cok
+sıkı SLA'larda maliyetli olabilir (bu veri setinde SLA min 24 saat).
+"""
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import config_opt as cfg
+from costs import handling_duration_minutes, rental_cost
+from portions import consume_fifo
+
+
+def build_rental_fleet(rentals):
+    """route -> [vehicle_type, vehicle_type, ...] (her fiziksel arac icin bir eleman)."""
+    fleet = {}
+    for r in rentals:
+        key = (r["origin"], r["destination"])
+        fleet.setdefault(key, []).extend([r["vehicle_type"]] * int(r["count"]))
+    return fleet
+
+
+def dispatch_rentals_for_day(route, date, fleet_types, vehicle_specs, distance, portion_pool, ledger):
+    """Bir rota + bir gun icin zorunlu kiralik arac sevkiyatini kurar.
+
+    portion_pool: bu rotanin (henuz tuketilmemis) portion listesi - in-place guncellenir.
+    Dondurur: dispatch kayitlari listesi (her fiziksel kiralik arac icin bir kayit).
+    """
+    if not fleet_types:
+        return []
+
+    origin, destination = route
+    dist_info = distance[route]
+    distance_km = dist_info["mesafe_km"]
+
+    total_capacity = sum(vehicle_specs[vt]["capacity"] for vt in fleet_types)
+
+    day_1700 = date + pd.Timedelta(hours=17)
+
+    carried, _ = consume_fifo(portion_pool, total_capacity, cutoff_time=day_1700)
+    carried_total = sum(desi for _, desi in carried)
+
+    dispatches = []
+    for idx, vt in enumerate(fleet_types):
+        cap = vehicle_specs[vt]["capacity"]
+        # ayni rotadaki kiralik araclara esit dolulukta pay dagit (eski repo mantigi)
+        share = cap * (carried_total / total_capacity) if total_capacity > 0 else 0.0
+
+        # elleçleme suresi HER ARACIN KENDI yukune gore hesaplanir (PDF: "bir arac
+        # icerisinde tasinan tum gonderiler icin elleçleme ayni anda baslar/biter" -
+        # yani sure o aracin kendi desisine bagli, diger araclarin yukune degil)
+        outbound_handling = handling_duration_minutes(share)
+        depart_at = day_1700 + pd.Timedelta(minutes=outbound_handling)
+
+        travel_hours = dist_info["duration"][vt]
+        arrive_at = depart_at + pd.Timedelta(hours=travel_hours)
+        inbound_handling = handling_duration_minutes(share)
+
+        cost = rental_cost(vt, distance_km, travel_hours, vehicle_specs)
+
+        # elleçleme kapasitesini kosulsuz tuket (zorunlu sevkiyat)
+        ledger.force_consume_handling(origin, date.normalize(), share)
+        ledger.force_consume_handling(destination, arrive_at.normalize(), share)
+
+        vehicle_id = f"R-{origin}-{destination}-{date.date()}-{idx}"
+        dispatches.append({
+            "vehicle_internal_id": vehicle_id,
+            "parent_delivery_id": vehicle_id,
+            "vehicle_class": "Kiralık",
+            "vehicle_type": vt,
+            "origin": origin,
+            "destination": destination,
+            "depart_at": depart_at,
+            "arrive_at": arrive_at,
+            "travel_hours": travel_hours,
+            "outbound_handling_min": outbound_handling,
+            "inbound_handling_min": inbound_handling,
+            "delivered_at": arrive_at + pd.Timedelta(minutes=inbound_handling),
+            "cost": cost,
+            "carried_desi": share,
+            "portions": [],  # asagida route bazinda tum arac gruplarina paylastirilir
+        })
+
+    # tasinan portion'lari araclara (yaklasik) esit oranla dagit - talep ID izlenebilirligi icin
+    _distribute_portions_to_vehicles(dispatches, carried)
+
+    return dispatches
+
+
+def _distribute_portions_to_vehicles(dispatches, carried):
+    """carried=[(talep_id,desi),...] listesini dispatches'e (araclara) FIFO dagitir,
+    her aracin carried_desi kapasitesini asmayacak sekilde."""
+    remaining_capacity = {i: d["carried_desi"] for i, d in enumerate(dispatches)}
+    v_idx = 0
+    for talep_id, desi in carried:
+        left = desi
+        while left > 1e-9 and v_idx < len(dispatches):
+            cap_left = remaining_capacity[v_idx]
+            take = min(cap_left, left)
+            if take > 1e-9:
+                dispatches[v_idx]["portions"].append((talep_id, take))
+                remaining_capacity[v_idx] -= take
+                left -= take
+            if remaining_capacity[v_idx] <= 1e-9:
+                v_idx += 1
