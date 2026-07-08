@@ -3,10 +3,14 @@ otomatik olarak ertesi gune tasan portion havuzu (ayri bir kuyruk yapisi gerekme
 tuketilmeyen portion zaten havuzda kalir ve ertesi gun tekrar "available" olur).
 
 Elleçleme kapasitesi asilirsa: PDF'e gore yukler bekletilip ertesi gun gonderilir -
-bu yuzden maliyet karsilastirmali bir "beklet mi cikart mi" karari YOK, kapasite
-sert bir kisit. Bu asamada min-doluluk kurali da olmadigindan (eski asamadan farkli
-olarak), talebi hemen cikarmak SLA cezasini onledigi icin her zaman tercih edilir -
-tek istisna kapasite yetersizligi.
+bu sert bir kisit, karar gerektirmez.
+
+Ayrica (kural olmasa da) maliyet-guduml bir "biriktir mi cikar mi" karari var:
+dusuk hacimli rotalarda sabit arac maliyeti (saatlik ucret) yuke bagli
+olmadigindan, her gun kucuk bir arac cikarmak yerine birkac gunluk talebi
+biriktirip daha dolu tek bir arac gondermek cok daha ucuz olabilir. Bu karar
+SLA riski yoksa (havuzdaki en erken deadline'a hala guvenli bir pay varsa)
+uygulanir - bkz. config_opt.MIN_FILL_THRESHOLD / SLA_SAFETY_HOURS.
 """
 import sys
 from pathlib import Path
@@ -17,19 +21,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
 from data_loader_opt import load_data, validate_all
 from state import CapacityLedger
-from portions import build_portion_pools, consume_fifo, available_desi
+from portions import build_portion_pools, consume_fifo, available_desi, earliest_deadline
 from rental import build_rental_fleet, dispatch_rentals_for_day
 from spot_assign import solve_spot
 from costs import handling_duration_minutes, spot_cost
 
 
-def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs, ledger):
+def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs, ledger,
+                             is_last_day=False, min_vehicle_capacity=None):
     """Bir rota icin bugunku (kiralik sonrasi kalan) talebi spot araclara atar.
 
     Elleçleme kapasitesi (cikis hub'i) sert bir tavan olarak once uygulanir;
     tir kapasitesi ise MIP icinde kisit olarak islenir (varis hub'i icin
     ayni-gun-varis varsayimiyla tahmini uygulanir, gercek varis tarihi
     farkli cikarsa bu bilinen bir basitlestirmedir).
+
+    Dusuk doluluk + SLA riski yoksa (ve son gun degilse) bugun hic cikilmaz,
+    talep havuzda kalip yarinki (daha dolu olabilecek) dalgada tekrar denenir.
     """
     origin, destination = route
     today = date.normalize()
@@ -37,6 +45,20 @@ def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs
     available_now = available_desi(pool, cutoff_time=day_1700)
     if available_now <= 1e-9:
         return []
+
+    if not is_last_day and min_vehicle_capacity:
+        fill_if_now = available_now / min_vehicle_capacity
+        if fill_if_now < cfg.MIN_FILL_THRESHOLD:
+            deadline = earliest_deadline(pool)
+            slack_hours = (deadline - day_1700).total_seconds() / 3600.0 if deadline else 1e9
+            # guvenlik payi, rotanin KENDI yolculuk suresini de hesaba katmali - orn.
+            # Istanbul->Sanliurfa gibi 15-18 saatlik uzun rotalarda duz "6 saat" payi
+            # yetersiz kalir (arac zaten yolda o kadar saat geciriyor); en hizli arac
+            # tipinin sure tahmini + sabit guvenlik payi kullanilir.
+            fastest_travel_hours = min(distance[route]["duration"].values())
+            required_lead_hours = fastest_travel_hours + cfg.SLA_SAFETY_HOURS
+            if slack_hours > required_lead_hours:
+                return []  # dusuk doluluk + SLA riski yok -> biriktirmeye devam et
 
     handling_left_origin = max(0.0, ledger.handling_remaining(origin, today))
     batch = min(available_now, handling_left_origin)
@@ -85,9 +107,9 @@ def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs
             vehicle_portions, remaining_consumed = _take_portions(remaining_consumed, per_vehicle_load)
 
             vehicle_id = f"S-{origin}-{destination}-{date.date()}-{v_no}"
+            vehicle_portions = [(tid, desi, vehicle_id) for tid, desi in vehicle_portions]
             dispatches.append({
                 "vehicle_internal_id": vehicle_id,
-                "parent_delivery_id": vehicle_id,
                 "vehicle_class": "Spot",
                 "vehicle_type": vt,
                 "origin": origin,
@@ -131,10 +153,12 @@ def run_schedule(data):
 
     all_routes = set(portion_pools) | set(fleet)
     dates = pd.date_range(cfg.TARGET_START, cfg.TARGET_END, freq="D")
+    min_vehicle_capacity = min(v["capacity"] for v in data["vehicle_specs"].values())
 
     all_dispatches = []
     for date in dates:
         day_1700 = date + pd.Timedelta(hours=17)
+        is_last_day = date.normalize() == cfg.TARGET_END.normalize()
         for route in sorted(all_routes):
             pool = portion_pools.get(route, [])
             fleet_types = fleet.get(route, [])
@@ -146,7 +170,8 @@ def run_schedule(data):
                 all_dispatches.extend(rentals_today)
 
             spot_today = _dispatch_spot_for_wave(
-                route, date, day_1700, pool, data["distance"], data["vehicle_specs"], ledger
+                route, date, day_1700, pool, data["distance"], data["vehicle_specs"], ledger,
+                is_last_day=is_last_day, min_vehicle_capacity=min_vehicle_capacity
             )
             all_dispatches.extend(spot_today)
 

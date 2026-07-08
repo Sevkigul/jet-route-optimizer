@@ -40,39 +40,41 @@ def build_output(dispatches, forecast_df, distance):
     dispatches = _assign_vehicle_ids(dispatches)
     demand_lookup = build_demand_lookup(forecast_df, distance)
 
-    # duz satirlar: her (arac, portion) icin bir satir. parent_delivery_id,
-    # konsolidasyon oncesi orijinal (bolunmemis) sevkiyati isaretler - ayni
-    # teslimatin 2 bacagi (leg1/leg2) ayni parent_delivery_id'yi paylasir,
-    # boylece gercek bolunme (farkli araclara PAYLASTIRILMIS talep) ile
-    # tek-teslimatin-cok-bacakli-rotasi (konsolidasyon) birbirine karismaz.
+    # duz satirlar: her (arac, portion) icin bir satir. chain_id, portion'un
+    # HANGI ORIJINAL sevkiyattan geldigini izler (rental.py/scheduler.py'da o
+    # portion ilk kez bir araca atandiginda o aracin vehicle_internal_id'si ile
+    # etiketlenir) - kac bacak degistirirse degistirsin (konsolidasyon: 1
+    # orijinal -> 2 bacak; hub-merge: 2 orijinal -> ortak bacakta birlesir)
+    # ayni chain_id korunur. Boylece gercek bolunme (ayni talebin FARKLI
+    # chain_id'lerde/orijinal sevkiyatlarda gecmesi) ile tek-teslimatin
+    # cok-bacakli-rotasi (ayni chain_id, birden fazla satir) birbirine karismaz.
     flat_rows = []
     for d in dispatches:
-        parent_id = d.get("parent_delivery_id", d["vehicle_internal_id"])
-        for p_idx, (talep_id, desi) in enumerate(d["portions"]):
+        for p_idx, (talep_id, desi, chain_id) in enumerate(d["portions"]):
             flat_rows.append({
                 "dispatch": d,
                 "p_idx": p_idx,
                 "original_talep_id": talep_id,
-                "parent_delivery_id": parent_id,
+                "chain_id": chain_id,
                 "desi": desi,
                 "is_terminal": d["destination"] == demand_lookup[talep_id]["destination"],
             })
 
-    # bolunme kontrolu: ayni talep_id FARKLI parent_delivery_id'lerde geciyorsa -N son eki
-    # (ayni parent_delivery_id'nin birden fazla bacagi varsa - konsolidasyon - bu SPLIT sayilmaz)
+    # bolunme kontrolu: ayni talep_id FARKLI chain_id'lerde geciyorsa -N son eki
+    # (ayni chain_id'nin birden fazla bacagi varsa - konsolidasyon/hub-merge - SPLIT sayilmaz)
     from collections import defaultdict
     groups = defaultdict(list)
     for row in flat_rows:
         groups[row["original_talep_id"]].append(row)
 
     for talep_id, rows in groups.items():
-        distinct_parents = sorted({r["parent_delivery_id"] for r in rows},
-                                   key=lambda pid: min(r["dispatch"]["depart_at"] for r in rows
-                                                        if r["parent_delivery_id"] == pid))
-        if len(distinct_parents) > 1:
-            suffix_by_parent = {pid: i for i, pid in enumerate(distinct_parents, start=1)}
+        distinct_chains = sorted({r["chain_id"] for r in rows},
+                                  key=lambda cid: min(r["dispatch"]["depart_at"] for r in rows
+                                                       if r["chain_id"] == cid))
+        if len(distinct_chains) > 1:
+            suffix_by_chain = {cid: i for i, cid in enumerate(distinct_chains, start=1)}
             for row in rows:
-                row["display_talep_id"] = f"{talep_id}-{suffix_by_parent[row['parent_delivery_id']]}"
+                row["display_talep_id"] = f"{talep_id}-{suffix_by_chain[row['chain_id']]}"
         else:
             for row in rows:
                 row["display_talep_id"] = talep_id
@@ -115,7 +117,7 @@ def build_output(dispatches, forecast_df, distance):
             "SLA cezası": round(penalty, cfg.COST_ROUND_DECIMALS),
             "Toplam maliyet": round(cost_this_row, cfg.COST_ROUND_DECIMALS),
             "_original_talep_id": row["original_talep_id"],
-            "_parent_delivery_id": row["parent_delivery_id"],
+            "_chain_id": row["chain_id"],
         })
 
     full_df = pd.DataFrame(out_rows)
@@ -145,12 +147,12 @@ def guard_against_template(out_df):
 def validate_desi_conservation(full_df, forecast_df):
     """Bolunen (ve bolunmeyen) taleplerin desi toplaminin orijinal talebe esit oldugunu dogrular.
 
-    Ayni parent_delivery_id'nin birden fazla bacagi (konsolidasyon) AYNI desiyi
-    tasidigindan, once (original_talep_id, parent_delivery_id) bazinda TEK bir
-    deger alinir (max - hepsi esit olmali), sonra bu degerler talep_id
-    bazinda toplanir. Boylece 2 bacakli bir teslimat desiyi 2 kez saymaz.
+    Ayni chain_id'nin birden fazla bacagi (konsolidasyon/hub-merge) AYNI desiyi
+    tasidigindan, once (original_talep_id, chain_id) bazinda TEK bir deger
+    alinir (max - hepsi esit olmali), sonra bu degerler talep_id bazinda
+    toplanir. Boylece cok bacakli bir teslimat desiyi birden fazla kez saymaz.
     """
-    per_delivery = full_df.groupby(["_original_talep_id", "_parent_delivery_id"])["Taşınan Desi"].max()
+    per_delivery = full_df.groupby(["_original_talep_id", "_chain_id"])["Taşınan Desi"].max()
     produced = per_delivery.groupby("_original_talep_id").sum()
     expected = forecast_df.set_index("talep_id")["desi"]
 

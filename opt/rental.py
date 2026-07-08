@@ -77,7 +77,6 @@ def dispatch_rentals_for_day(route, date, fleet_types, vehicle_specs, distance, 
         vehicle_id = f"R-{origin}-{destination}-{date.date()}-{idx}"
         dispatches.append({
             "vehicle_internal_id": vehicle_id,
-            "parent_delivery_id": vehicle_id,
             "vehicle_class": "Kiralık",
             "vehicle_type": vt,
             "origin": origin,
@@ -101,7 +100,14 @@ def dispatch_rentals_for_day(route, date, fleet_types, vehicle_specs, distance, 
 
 def _distribute_portions_to_vehicles(dispatches, carried):
     """carried=[(talep_id,desi),...] listesini dispatches'e (araclara) FIFO dagitir,
-    her aracin carried_desi kapasitesini asmayacak sekilde."""
+    her aracin carried_desi kapasitesini asmayacak sekilde.
+
+    Her portion'a, tasiyan aracin kendi vehicle_internal_id'si "chain_id" olarak
+    eklenir - bu, portion'un konsolidasyon/hub-merge sirasinda kac bacak
+    degistirirse degistirsin hangi ORIJINAL sevkiyattan geldigini izler
+    (output_opt.py bunu gercek bolunme ile cok-bacakli-tek-teslimat'i
+    ayirt etmek icin kullanir).
+    """
     remaining_capacity = {i: d["carried_desi"] for i, d in enumerate(dispatches)}
     v_idx = 0
     for talep_id, desi in carried:
@@ -110,7 +116,8 @@ def _distribute_portions_to_vehicles(dispatches, carried):
             cap_left = remaining_capacity[v_idx]
             take = min(cap_left, left)
             if take > 1e-9:
-                dispatches[v_idx]["portions"].append((talep_id, take))
+                chain_id = dispatches[v_idx]["vehicle_internal_id"]
+                dispatches[v_idx]["portions"].append((talep_id, take, chain_id))
                 remaining_capacity[v_idx] -= take
                 left -= take
             if remaining_capacity[v_idx] <= 1e-9:

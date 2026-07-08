@@ -32,7 +32,7 @@ MAX_DETOUR_RATIO = 2.0   # dist(o,m)+dist(m,d) <= bu oran * dist(o,d) olmali
 
 def _portion_sla_delta(portions, demand_lookup, old_delivered_at, new_delivered_at):
     delta = 0.0
-    for talep_id, desi in portions:
+    for talep_id, desi, _chain_id in portions:
         info = demand_lookup[talep_id]
         old_delay = delay_hours_ceiled(old_delivered_at, info["deadline"])
         new_delay = delay_hours_ceiled(new_delivered_at, info["deadline"])
@@ -105,10 +105,8 @@ def _try_candidate(d, hub_m, distance, vehicle_specs, ledger, demand_lookup):
             ledger.release_truck(hub, date, vid)
         return None
 
-    parent_id = d.get("parent_delivery_id", d["vehicle_internal_id"])
     leg1 = {
         "vehicle_internal_id": f"{d['vehicle_internal_id']}-C1",
-        "parent_delivery_id": parent_id,
         "vehicle_class": "Spot",
         "vehicle_type": vt,
         "origin": origin,
@@ -125,7 +123,6 @@ def _try_candidate(d, hub_m, distance, vehicle_specs, ledger, demand_lookup):
     }
     leg2 = {
         "vehicle_internal_id": f"{d['vehicle_internal_id']}-C2",
-        "parent_delivery_id": parent_id,
         "vehicle_class": "Spot",
         "vehicle_type": vt,
         "origin": hub_m,

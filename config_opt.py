@@ -42,6 +42,27 @@ TRUCK_CAP_VEHICLE_TYPE = "Tır"   # kapasite sadece bu arac tipini sinirlar
 # --- Kiralik arac varsayilan cikis saati (talep sifir olsa bile) -----------
 RENTAL_DEFAULT_HOUR = 9
 
+# --- Dusuk hacimli rotalarda "biriktir mi cikar mi" karari ------------------
+# Min-doluluk KURALI yok ama maliyet acisindan hala anlamli: sabit arac
+# maliyeti yuke bagli olmadigindan, dusuk talepli rotalarda her gun kucuk
+# bir arac cikarmak yerine birkac gunluk talebi biriktirip tek seferde
+# gondermek cok daha ucuz olabilir. Bu iki parametre bu karari yonetir:
+#   - batch/en_kucuk_arac_kapasitesi < MIN_FILL_THRESHOLD VE
+#   - havuzdaki en erken deadline'a en az SLA_SAFETY_HOURS saat varsa
+#   -> bugun cikma, biriktirmeye devam et (kapasite/SLA riski yoksa).
+# Guvenlik payi formulu: required_lead_hours = rotanin en hizli arac tipi
+# suresi + SLA_SAFETY_HOURS (bkz. scheduler.py). Bu, uzun rotalarda (orn.
+# Istanbul->Sanliurfa, 1213km, ~15-18 saat yolculuk) duz bir sabit saatin
+# yetersiz kalacagini hesaba katar - rota ne kadar uzunsa o kadar erken
+# zorunlu dispatch tetiklenir. SLA_SAFETY_HOURS negatif olabilir (kalan
+# payin negatif olmasi, "en hizli aracin bile tam zamaninda yetisemeyecegi"
+# anlamina gelir - SLA cezasi bu veri setinde (0.4 TL/desi/saat) arac
+# maliyetine kiyasla ucuz oldugundan, bu bilincli bir maliyet tercihi).
+# Degerler parametre taramasiyla (fill_threshold x safety_hours grid search)
+# bulundu - toplam maliyeti (arac + SLA cezasi) minimize eden nokta.
+MIN_FILL_THRESHOLD = 0.65
+SLA_SAFETY_HOURS = -4
+
 # --- Konsolidasyon ----------------------------------------------------------
 CONSOLIDATION_MAX_HOPS = 1   # sadece 1-hop (A->B->C) trans-shipment aranir
 CONSOLIDATION_ENABLED = True
