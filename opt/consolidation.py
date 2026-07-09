@@ -149,7 +149,8 @@ def run_consolidation(dispatches, distance, vehicle_specs, ledger, demand_lookup
     n_applied = 0
 
     for d in dispatches:
-        if d["vehicle_class"] != "Spot":
+        if d["vehicle_class"] != "Spot" or d.get("vehicle_group_id"):
+            # milk-run bacaklari (vehicle_group_id'si var) tekrar aday sayilmaz
             result.append(d)
             continue
 

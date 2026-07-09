@@ -18,6 +18,8 @@ from scheduler import run_schedule
 from consolidation import run_consolidation
 from hub_merge import run_hub_merge
 from hub_split import run_hub_split
+from rental_piggyback import run_rental_piggyback
+from milkrun import run_milkrun
 from output_opt import save_output, build_demand_lookup
 
 
@@ -25,35 +27,47 @@ def main():
     print(f"Hedef tarih araligi: {cfg.TARGET_START.date()} -> {cfg.TARGET_END.date()} "
           f"(talep tahmini asamasiyla ayni pencere)\n")
 
-    print("[1/6] Veri yukleniyor ve dogrulaniyor...")
+    print("[1/8] Veri yukleniyor ve dogrulaniyor...")
     data = load_data()
     validate_all(data)
 
-    print("\n[2/6] Zamanlama (kiralik + spot, kapasite kisitli, SLA-riskisiz biriktirme) calistiriliyor...")
+    print("\n[2/8] Zamanlama (kiralik + spot, kapasite kisitli, SLA-riskisiz biriktirme) calistiriliyor...")
     dispatches, leftover, ledger = run_schedule(data)
 
     demand_lookup = build_demand_lookup(data["forecast"], data["distance"])
     hubs = list(data["handling_capacity"])
 
-    print("\n[3/6] Konsolidasyon (Faz B: tek-sevkiyat reroute) araniyor...")
+    print("\n[3/8] Milk-run (Faz F: cok-duraklı ugrama, yeniden ellecleme yok) araniyor...")
+    dispatches, savings_f, n_f = run_milkrun(
+        dispatches, data["distance"], data["vehicle_specs"], ledger, demand_lookup
+    )
+    print(f"  {n_f} milk-run rotasi olusturuldu, tahmini net kazanc: {savings_f:,.2f} TL")
+
+    print("\n[4/8] Konsolidasyon (Faz B: tek-sevkiyat reroute) araniyor...")
     dispatches, savings_b, n_b = run_consolidation(
         dispatches, data["distance"], data["vehicle_specs"], ledger, demand_lookup, hubs
     )
     print(f"  {n_b} konsolidasyon uygulandi, tahmini net kazanc: {savings_b:,.2f} TL")
 
-    print("\n[4/6] Hub-birlestirme (Faz C: ayni-hedef coklu-sevkiyat merge) araniyor...")
+    print("\n[5/8] Hub-birlestirme (Faz C: ayni-hedef coklu-sevkiyat merge) araniyor...")
     dispatches, savings_c, n_c = run_hub_merge(
         dispatches, data["distance"], data["vehicle_specs"], ledger, demand_lookup, hubs
     )
     print(f"  {n_c} hub-birlestirme uygulandi, tahmini net kazanc: {savings_c:,.2f} TL")
 
-    print("\n[5/6] Hub-bolme (Faz D: ayni-cikis coklu-sevkiyat split) araniyor...")
+    print("\n[6/8] Hub-bolme (Faz D: ayni-cikis coklu-sevkiyat split) araniyor...")
     dispatches, savings_d, n_d = run_hub_split(
         dispatches, data["distance"], data["vehicle_specs"], ledger, demand_lookup, hubs
     )
     print(f"  {n_d} hub-bolme uygulandi, tahmini net kazanc: {savings_d:,.2f} TL")
 
-    print("\n[6/6] Cikti uretiliyor ve sema kontrolu yapiliyor...")
+    print("\n[7/8] Kiralik bos kapasite kullanimi (Faz E) araniyor...")
+    dispatches, savings_e, n_e = run_rental_piggyback(
+        dispatches, data["distance"], data["vehicle_specs"], ledger, demand_lookup
+    )
+    print(f"  {n_e} yuk bindirildi, tahmini net kazanc: {savings_e:,.2f} TL")
+
+    print("\n[8/8] Cikti uretiliyor ve sema kontrolu yapiliyor...")
     out_df = save_output(dispatches, data["forecast"], data["distance"])
 
     rental_cost_total = sum(d["cost"] for d in dispatches if d["vehicle_class"] == "Kiralık")

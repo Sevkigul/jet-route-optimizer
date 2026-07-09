@@ -37,6 +37,12 @@ GROUP_SIZES = (2, 3, 4)
 
 
 def _fill_ratio(d, vehicle_specs):
+    """Milk-run bacaklari (vehicle_group_id'si var) hicbir zaman aday sayilmaz -
+    zaten cok-duraklı bir rotanin parcasi, tekrar birlestirme/bolme/piggyback
+    aramasina sokulmasi hem gereksiz hem de maliyet paylasimini bozar (rota
+    maliyeti sadece ilk bacakta tutuluyor)."""
+    if d.get("vehicle_group_id"):
+        return float("inf")
     return d["carried_desi"] / vehicle_specs[d["vehicle_type"]]["capacity"]
 
 

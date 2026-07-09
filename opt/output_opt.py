@@ -1,6 +1,7 @@
 """Dispatch kayitlarindan TAŞIMA PLANI.xlsx formatina donusum + sema korumasi."""
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -18,10 +19,23 @@ REQUIRED_COLUMNS = [
 
 
 def _assign_vehicle_ids(dispatches):
-    ordered = sorted(dispatches, key=lambda d: (d["depart_at"], d["origin"], d["destination"]))
-    for i, d in enumerate(ordered, start=1):
-        d["arac_id"] = f"V{i:04d}"
-    return ordered
+    """Ayni fiziksel araca ait TUM bacaklar (orn. milk-run'in coklu duraklari)
+    ayni Arac ID'yi paylasir - bunlar 'vehicle_group_id' alaniyla gruplanir
+    (cogu dispatch icin bu alan yoktur, o zaman kendi vehicle_internal_id'si
+    grup kimligi olarak kullanilir - tek-bacakli araclar icin degisiklik yok)."""
+    groups = defaultdict(list)
+    for d in dispatches:
+        gid = d.get("vehicle_group_id", d["vehicle_internal_id"])
+        groups[gid].append(d)
+
+    ordered_groups = sorted(
+        groups.items(),
+        key=lambda kv: (min(x["depart_at"] for x in kv[1]), kv[1][0]["origin"])
+    )
+    for i, (gid, legs) in enumerate(ordered_groups, start=1):
+        for d in legs:
+            d["arac_id"] = f"V{i:04d}"
+    return dispatches
 
 
 def build_demand_lookup(forecast_df, distance):
