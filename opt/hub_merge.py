@@ -157,12 +157,28 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
         if net_savings <= 0:
             continue
 
+        # ONEMLI: her uye zaten ESKI (dogrudan) varisiyla hedefin elleçleme
+        # kapasitesini tuketmis durumda. Uyeler artik hedefe hub_m uzerinden,
+        # FARKLI bir zamanda variyor - bu yuzden once eski tuketimi iade edip,
+        # sonra YENI (birlesik) varis tuketimini ayrica kaydetmemiz gerekir;
+        # aksi halde hedefin kapasitesi hic dogru izlenmemis olurdu (bkz. milkrun.py'deki
+        # ayni desendeki cikis-tarafi duzeltmesi).
+        original_dest_consumption = []
+        for m in members:
+            ledger.release_handling_timed(destination, m["arrive_at"], m["inbound_handling_min"], m["carried_desi"])
+            original_dest_consumption.append((destination, m["arrive_at"], m["inbound_handling_min"], m["carried_desi"]))
+
+        def _restore_original_dest():
+            for hub, start, dur, desi in original_dest_consumption:
+                ledger.force_consume_handling_timed(hub, start, dur, desi)
+
         # elleçleme kapasitesi: N indirme (paralel/toplu, latest_arrival'da baslar)
         # + 1 yukleme (indirmeler bitince baslar) - gece yarisi asarsa oranli bolunur
         reload_start = latest_arrival + pd.Timedelta(minutes=unload_minutes)
         unload_ok = ledger.try_consume_handling_timed(hub_m, latest_arrival, unload_minutes, total_desi)
         reload_ok = ledger.try_consume_handling_timed(hub_m, reload_start, reload_minutes, total_desi) if unload_ok else False
-        ok = unload_ok and reload_ok
+        final_ok = ledger.try_consume_handling_timed(destination, arrive2, inbound_final, total_desi) if reload_ok else False
+        ok = unload_ok and reload_ok and final_ok
 
         truck_vid = "MERGE-" + "-".join(m["vehicle_internal_id"] for m in members)
         truck_ok = True
@@ -176,10 +192,13 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
                 ledger.release_handling_timed(hub_m, latest_arrival, unload_minutes, total_desi)
             if reload_ok:
                 ledger.release_handling_timed(hub_m, reload_start, reload_minutes, total_desi)
+            if final_ok:
+                ledger.release_handling_timed(destination, arrive2, inbound_final, total_desi)
             if ok and vt_leg2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
                 m_date = latest_arrival.normalize()
                 ledger.release_truck(hub_m, m_date, truck_vid)
                 ledger.release_truck(destination, arrive2.normalize(), truck_vid)
+            _restore_original_dest()
             continue
 
         # leg1'de arac tipi degistiyse, cikis hub'inin tir kapasitesini buna
@@ -211,10 +230,12 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
                     ledger.try_consume_truck(hub, date, vid)  # eski tuketimi geri koy
             ledger.release_handling_timed(hub_m, latest_arrival, unload_minutes, total_desi)
             ledger.release_handling_timed(hub_m, reload_start, reload_minutes, total_desi)
+            ledger.release_handling_timed(destination, arrive2, inbound_final, total_desi)
             if vt_leg2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
                 m_date = latest_arrival.normalize()
                 ledger.release_truck(hub_m, m_date, truck_vid)
                 ledger.release_truck(destination, arrive2.normalize(), truck_vid)
+            _restore_original_dest()
             continue
 
         candidate = {
@@ -226,10 +247,13 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
             "reload_start": reload_start,
             "reload_minutes": reload_minutes,
             "total_desi": total_desi,
+            "arrive2": arrive2,
+            "inbound_final": inbound_final,
             "dest_date": arrive2.normalize(),
             "vt_leg2": vt_leg2,
             "truck_vid": truck_vid,
             "origin_truck_applied": origin_truck_applied,
+            "original_dest_consumption": original_dest_consumption,
             "legs": _build_legs(legs1, hub_m, destination, vt_leg2, cost2, depart2, arrive2,
                                  total_desi, unload_minutes, reload_minutes, new_delivered_at,
                                  min2),
@@ -285,6 +309,10 @@ def _rollback(candidate, ledger):
                                    candidate["unload_minutes"], candidate["total_desi"])
     ledger.release_handling_timed(candidate["hub_m"], candidate["reload_start"],
                                    candidate["reload_minutes"], candidate["total_desi"])
+    ledger.release_handling_timed(candidate["destination"], candidate["arrive2"],
+                                   candidate["inbound_final"], candidate["total_desi"])
+    for hub, start, dur, desi in candidate.get("original_dest_consumption", []):
+        ledger.force_consume_handling_timed(hub, start, dur, desi)
     if candidate["vt_leg2"] == cfg.TRUCK_CAP_VEHICLE_TYPE:
         m_date = candidate["latest_arrival"].normalize()
         ledger.release_truck(candidate["hub_m"], m_date, candidate["truck_vid"])

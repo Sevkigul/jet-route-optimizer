@@ -27,7 +27,7 @@ zira elleçleme toplam miktari hangi rota secilirse secilsin ayni kaliyor,
 sadece YOLCULUK maliyeti rotalar arasinda ayirt edici oluyor.
 """
 import sys
-from itertools import combinations
+from itertools import combinations, permutations
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -137,6 +137,62 @@ def _cheapest_route_vehicle(origin, stops, dest_members, distance, vehicle_specs
     return best_vt, best_cost
 
 
+MAX_STOPS_FOR_ORDER_SEARCH = 5   # bu sayidan fazla durakta permutasyon aramasi pahali olur
+
+
+def _simulate_sla_delta(origin, stops, dest_members, vt, distance, demand_lookup):
+    """Ledger'a dokunmadan, verilen durak SIRASI icin olusacak SLA cezasi
+    degisimini (eski dogrudan sevkiyatlara kiyasla) hesaplar. Sadece
+    siralamayi kiyaslamak icin kullanilir (aday secimi), gercek commit
+    _try_build_route icinde ayrica yapilir."""
+    all_members = [m for d in stops for m in dest_members[d]]
+    depart_after = max(m["depart_at"] for m in all_members)
+    total_desi = sum(m["carried_desi"] for m in all_members)
+    outbound_handling = handling_duration_minutes(total_desi)
+    t_cursor = depart_after + pd.Timedelta(minutes=outbound_handling)
+    prev = origin
+    sla_delta = 0.0
+    for d in stops:
+        if (prev, d) not in distance:
+            return None
+        travel_min = travel_minutes(distance[(prev, d)]["duration"][vt])
+        arrive = t_cursor + pd.Timedelta(minutes=travel_min)
+        dropped = sum(m["carried_desi"] for m in dest_members[d])
+        hm = handling_duration_minutes(dropped)
+        done = arrive + pd.Timedelta(minutes=hm)
+        for m in dest_members[d]:
+            for talep_id, desi, _cid in m["portions"]:
+                info = demand_lookup[talep_id]
+                old_delay = delay_hours_ceiled(m["delivered_at"], info["deadline"])
+                new_delay = delay_hours_ceiled(done, info["deadline"])
+                sla_delta += sla_penalty(desi, new_delay) - sla_penalty(desi, old_delay)
+        t_cursor, prev = done, d
+    return sla_delta
+
+
+def _best_stop_order(origin, stops, dest_members, distance, vehicle_specs, demand_lookup):
+    """Kucuk gruplarda (<=5 durak) tum durak siralamalarini dener, maliyet+SLA
+    cezasi toplamini minimize edeni secer. Clarke-Wright sadece maliyete gore
+    sira veriyordu - SLA aciliyetini hic hesaba katmiyordu; bu, ayni maliyetle
+    (bazen) SLA cezasini dusurebilecek "bedava" bir iyilestirme."""
+    if len(stops) < 3 or len(stops) > MAX_STOPS_FOR_ORDER_SEARCH:
+        return stops  # 2 durakta tek olasi sira var, buyuk gruplarda arama pahali
+
+    best_order, best_score = stops, None
+    for perm in permutations(stops):
+        perm = list(perm)
+        vt, route_cost = _cheapest_route_vehicle(origin, perm, dest_members, distance, vehicle_specs)
+        if vt is None:
+            continue
+        sla_delta = _simulate_sla_delta(origin, perm, dest_members, vt, distance, demand_lookup)
+        if sla_delta is None:
+            continue
+        score = route_cost + sla_delta
+        if best_score is None or score < best_score:
+            best_score, best_order = score, perm
+    return best_order
+
+
 def _try_build_route(origin, stops, dest_members, distance, vehicle_specs, ledger, demand_lookup):
     total_desi = sum(m["carried_desi"] for d in stops for m in dest_members[d])
     original_cost = sum(m["cost"] for d in stops for m in dest_members[d])
@@ -146,12 +202,35 @@ def _try_build_route(origin, stops, dest_members, distance, vehicle_specs, ledge
         return None
 
     all_members = [m for d in stops for m in dest_members[d]]
+
+    # ONEMLI: bu uyeler zaten scheduler asamasinda kendi (ayri) sevkiyatlari
+    # olarak cikis (origin) VE varis (destination) elleçleme kapasitesini
+    # tuketmis durumda. Bu tuketimi ONCE iade etmezsek, ayni desi icin
+    # kapasiteyi IKINCI KEZ tuketmeye calisirdik (neredeyse her zaman
+    # basarisiz olur, cunku o gunun kapasitesi zaten dolu gorunur) -
+    # birlestirilmis rota, FIZIKSEL olarak ayni yuku tasidigindan net
+    # kapasite ihtiyaci degismez, sadece TEK bir cikis elleclemesi olarak
+    # yeniden hesaplanir.
+    original_consumption = []
+    for m in all_members:
+        o_start = m["depart_at"] - pd.Timedelta(minutes=m["outbound_handling_min"])
+        ledger.release_handling_timed(origin, o_start, m["outbound_handling_min"], m["carried_desi"])
+        original_consumption.append((origin, o_start, m["outbound_handling_min"], m["carried_desi"]))
+        d_start = m["arrive_at"]
+        ledger.release_handling_timed(m["destination"], d_start, m["inbound_handling_min"], m["carried_desi"])
+        original_consumption.append((m["destination"], d_start, m["inbound_handling_min"], m["carried_desi"]))
+
+    def _restore_original():
+        for hub, start, dur, desi in original_consumption:
+            ledger.force_consume_handling_timed(hub, start, dur, desi)
+
     depart_after = max(m["depart_at"] for m in all_members)
     outbound_handling = handling_duration_minutes(total_desi)
     depart = depart_after + pd.Timedelta(minutes=outbound_handling)
 
     ok_origin = ledger.try_consume_handling_timed(origin, depart_after, outbound_handling, total_desi)
     if not ok_origin:
+        _restore_original()
         return None
 
     consumed = [(origin, depart_after, outbound_handling, total_desi)]
@@ -200,12 +279,14 @@ def _try_build_route(origin, stops, dest_members, distance, vehicle_specs, ledge
     if not ok:
         for hub, start, dur, desi in consumed:
             ledger.release_handling_timed(hub, start, dur, desi)
+        _restore_original()
         return None
 
     net_savings = (original_cost - route_cost) - sla_delta
     if net_savings <= 0:
         for hub, start, dur, desi in consumed:
             ledger.release_handling_timed(hub, start, dur, desi)
+        _restore_original()
         return None
 
     # maliyeti ilk bacakta goster, digerlerinde 0 (cifte sayimi onlemek icin - output_opt'taki
@@ -251,6 +332,7 @@ def run_milkrun(dispatches, distance, vehicle_specs, ledger, demand_lookup):
                 for m in dest_members[stops[0]] if stops else []:
                     result.append(m)
                 continue
+            stops = _best_stop_order(origin, stops, dest_members, distance, vehicle_specs, demand_lookup)
             built = _try_build_route(origin, stops, dest_members, distance, vehicle_specs, ledger, demand_lookup)
             if built:
                 result.extend(built["legs"])

@@ -109,9 +109,32 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
         if net_savings <= 0:
             continue
 
-        # elleçleme: 1 ortak indirme (unload_minutes, shared_arrive1'de baslar)
+        # ONEMLI: her uye zaten ESKI cikis (origin) VE varis (kendi hedefi)
+        # elleçleme tuketimini yapmis durumda. Simdi cikis TEK bir birlesik
+        # bacak (leg1) oluyor, varis ise FARKLI bir zamanda (hub_m uzerinden)
+        # gerceklesiyor - once eski tuketimi iade edip sonra YENI tuketimleri
+        # ayrica kaydetmemiz gerekir (bkz. milkrun.py / hub_merge.py'deki ayni
+        # desen).
+        original_consumption = []
+        for m in members:
+            o_start = m["depart_at"] - pd.Timedelta(minutes=m["outbound_handling_min"])
+            ledger.release_handling_timed(m["origin"], o_start, m["outbound_handling_min"], m["carried_desi"])
+            original_consumption.append((m["origin"], o_start, m["outbound_handling_min"], m["carried_desi"]))
+            ledger.release_handling_timed(m["destination"], m["arrive_at"], m["inbound_handling_min"], m["carried_desi"])
+            original_consumption.append((m["destination"], m["arrive_at"], m["inbound_handling_min"], m["carried_desi"]))
+
+        def _restore_original():
+            for hub, start, dur, desi in original_consumption:
+                ledger.force_consume_handling_timed(hub, start, dur, desi)
+
+        # elleçleme: 1 ortak cikis (outbound1, leg1 icin, shared_depart1'den once baslar)
+        # + 1 ortak indirme (unload_minutes, shared_arrive1'de baslar)
         # + her uye icin AYRI (paralel) yukleme (kendi reload_minutes'i, reload_start'ta baslar)
-        unload_ok = ledger.try_consume_handling_timed(hub_m, shared_arrive1, unload_minutes, total_desi)
+        # + her uye icin kendi hedefindeki varis elleçlemesi (arrive2'de)
+        outbound1 = handling_duration_minutes(total_desi)
+        origin_start1 = shared_depart1 - pd.Timedelta(minutes=outbound1)
+        outbound_ok = ledger.try_consume_handling_timed(origin, origin_start1, outbound1, total_desi)
+        unload_ok = ledger.try_consume_handling_timed(hub_m, shared_arrive1, unload_minutes, total_desi) if outbound_ok else False
         reload_ops = []
         reload_ok = True
         if unload_ok:
@@ -122,7 +145,18 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
                 else:
                     reload_ok = False
                     break
-        ok = unload_ok and reload_ok
+        final_ops = []
+        final_ok = True
+        if unload_ok and reload_ok:
+            for x in legs2:
+                m = x["member"]
+                inbound_final = handling_duration_minutes(m["carried_desi"])
+                if ledger.try_consume_handling_timed(m["destination"], x["arrive2"], inbound_final, m["carried_desi"]):
+                    final_ops.append((m["destination"], x["arrive2"], inbound_final, m["carried_desi"]))
+                else:
+                    final_ok = False
+                    break
+        ok = outbound_ok and unload_ok and reload_ok and final_ok
 
         leg1_vid = "SPLIT1-" + "-".join(m["vehicle_internal_id"] for m in members)
         truck_ops = []
@@ -153,22 +187,32 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
                         break
 
         if not ok or not truck_ok or not leg2_truck_ok:
+            if outbound_ok:
+                ledger.release_handling_timed(origin, origin_start1, outbound1, total_desi)
             if unload_ok:
                 ledger.release_handling_timed(hub_m, shared_arrive1, unload_minutes, total_desi)
             for hub, start, dur, desi in reload_ops:
                 ledger.release_handling_timed(hub, start, dur, desi)
+            for hub, start, dur, desi in final_ops:
+                ledger.release_handling_timed(hub, start, dur, desi)
             for hub, date, vid in truck_ops:
                 ledger.release_truck(hub, date, vid)
+            _restore_original()
             continue
 
         candidate = {
             "net_savings": net_savings,
+            "origin": origin,
+            "origin_start1": origin_start1,
+            "outbound1": outbound1,
             "hub_m": hub_m,
             "shared_arrive1": shared_arrive1,
             "unload_minutes": unload_minutes,
             "total_desi": total_desi,
             "reload_ops": reload_ops,
+            "final_ops": final_ops,
             "truck_ops": truck_ops,
+            "original_consumption": original_consumption,
             "legs": _build_legs(members, origin, hub_m, vt1, cost1, shared_depart1, shared_arrive1,
                                  min1, total_desi, unload_minutes, legs2),
         }
@@ -213,12 +257,18 @@ def _build_legs(members, origin, hub_m, vt1, cost1, depart1, arrive1, min1,
 
 
 def _rollback(candidate, ledger):
+    ledger.release_handling_timed(candidate["origin"], candidate["origin_start1"],
+                                   candidate["outbound1"], candidate["total_desi"])
     ledger.release_handling_timed(candidate["hub_m"], candidate["shared_arrive1"],
                                    candidate["unload_minutes"], candidate["total_desi"])
     for hub, start, dur, desi in candidate["reload_ops"]:
         ledger.release_handling_timed(hub, start, dur, desi)
+    for hub, start, dur, desi in candidate["final_ops"]:
+        ledger.release_handling_timed(hub, start, dur, desi)
     for hub, date, vid in candidate["truck_ops"]:
         ledger.release_truck(hub, date, vid)
+    for hub, start, dur, desi in candidate.get("original_consumption", []):
+        ledger.force_consume_handling_timed(hub, start, dur, desi)
 
 
 def run_hub_split(dispatches, distance, vehicle_specs, ledger, demand_lookup, hubs):

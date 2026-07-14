@@ -66,6 +66,12 @@ RENTAL_DEFAULT_HOUR = 9
 MIN_FILL_THRESHOLD = 0.50
 SLA_SAFETY_HOURS = -2
 
+# Rota bazinda SLA suresine (1 veya 2 gun) gore FARKLI guvenlik payi denendi
+# (parametre taramasi) - hicbir kombinasyon global SLA_SAFETY_HOURS'tan daha
+# iyi cikmadi (mevcut deger zaten oyle bir yerel optimumda ki rota bazinda
+# ayirt etmek net kazanc saglamiyor). Bu yuzden ayni degeri kullanmaya devam
+# ediyoruz - SLA_SAFETY_HOURS_BY_GUN karmasikligi kaldirildi.
+
 # --- Konsolidasyon ----------------------------------------------------------
 CONSOLIDATION_MAX_HOPS = 1   # sadece 1-hop (A->B->C) trans-shipment aranir
 CONSOLIDATION_ENABLED = True

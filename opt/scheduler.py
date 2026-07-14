@@ -54,7 +54,8 @@ def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs
             # guvenlik payi, rotanin KENDI yolculuk suresini de hesaba katmali - orn.
             # Istanbul->Sanliurfa gibi 15-18 saatlik uzun rotalarda duz "6 saat" payi
             # yetersiz kalir (arac zaten yolda o kadar saat geciriyor); en hizli arac
-            # tipinin sure tahmini + sabit guvenlik payi kullanilir.
+            # tipinin sure tahmini + sabit guvenlik payi kullanilir. (Rota SLA suresine
+            # gore ayirt edilen bir versiyon denendi, kazanc saglamadigi icin geri alindi.)
             fastest_travel_hours = min(distance[route]["duration"].values())
             required_lead_hours = fastest_travel_hours + cfg.SLA_SAFETY_HOURS
             if slack_hours > required_lead_hours:
