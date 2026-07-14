@@ -1,4 +1,13 @@
-"""Elleçleme suresi, kiralik/spot maliyet ve SLA cezasi - saf fonksiyonlar."""
+"""Elleçleme suresi, kiralik/spot maliyet ve SLA cezasi - saf fonksiyonlar.
+
+Organizasyon Soru-Cevap netlestirmeleri (2026.07):
+- Tum sureler (yolculuk VE elleçleme) dakikaya cevrilip YUKARI yuvarlanir.
+  Ornek: 0.92 saat = 55.2 dk -> 56 dk.
+- "Kullanim Suresi" (maliyet formulundeki), sadece yolculuk suresi DEGIL;
+  cikis elleçlemesi + yolculuk + varis elleçlemesi + bekleme sürelerinin
+  TOPLAMIdir. Resmi ornek: 10000 desi, 5 saatlik yol ->
+  100 dk (cikis elleç.) + 300 dk (yol) + 100 dk (varis elleç.) = 500 dk.
+"""
 import math
 import sys
 from datetime import timedelta
@@ -8,20 +17,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
 
 
+def round_up_minutes(minutes):
+    """Herhangi bir sureyi (dakika) en yakin BUYUK tam sayiya yuvarlar."""
+    return math.ceil(minutes - 1e-9)
+
+
+def travel_minutes(travel_hours):
+    """Yolculuk suresini (saat) dakikaya cevirip yukari yuvarlar."""
+    return round_up_minutes(travel_hours * 60.0)
+
+
 def handling_duration_minutes(batch_desi):
-    """Bir aracin tum yukunun elleclenme suresi (dakika). Cikis ve varis icin
-    ayri ayri cagrilir, her ikisi de aracin TOPLAM yukune gore hesaplanir."""
-    return cfg.HANDLING_MIN_PER_DESI * batch_desi
+    """Bir aracin tum yukunun elleclenme suresi (dakika), yukari yuvarlanmis
+    tam sayi. Cikis ve varis icin ayri ayri cagrilir, her ikisi de aracin
+    TOPLAM yukune gore hesaplanir."""
+    return round_up_minutes(cfg.HANDLING_MIN_PER_DESI * batch_desi)
 
 
-def rental_cost(vehicle_type, distance_km, travel_hours, specs):
+def usage_hours(outbound_handling_min, travel_min, inbound_handling_min, waiting_min=0.0):
+    """Toplam 'Kullanim Suresi' (saat) = cikis elleçleme + yolculuk + varis
+    elleçleme + bekleme (hepsi dakika olarak toplanir, sonra saate cevrilir).
+    Tum bilesenler zaten yukari-yuvarlanmis tam dakika olarak verilmelidir."""
+    return (outbound_handling_min + travel_min + inbound_handling_min + waiting_min) / 60.0
+
+
+def rental_cost(vehicle_type, distance_km, usage_hrs, specs):
     s = specs[vehicle_type]
-    return s["rental_hourly"] * travel_hours + s["rental_km"] * distance_km
+    return s["rental_hourly"] * usage_hrs + s["rental_km"] * distance_km
 
 
-def spot_cost(vehicle_type, distance_km, travel_hours, specs):
+def spot_cost(vehicle_type, distance_km, usage_hrs, specs):
     s = specs[vehicle_type]
-    return s["spot_hourly"] * travel_hours + s["spot_km"] * distance_km
+    return s["spot_hourly"] * usage_hrs + s["spot_km"] * distance_km
 
 
 def sla_deadline(created_at, sla_gun):
@@ -46,12 +73,25 @@ def sla_penalty(desi, delay_hours):
 if __name__ == "__main__":
     import pandas as pd
 
-    created = pd.Timestamp("2026-07-07 15:00:00")
-    # PDF ornegi: 5000 desi, 15:00 varis, elleçleme 50 dk -> 15:50 elleçlenmis
-    print("elleçleme suresi (5000 desi):", handling_duration_minutes(5000), "dk (beklenen 50.0)")
+    # Resmi ornek (Soru-Cevap): 10000 desi, 5 saatlik yol, bekleme yok
+    out_h = handling_duration_minutes(10000)
+    trav_m = travel_minutes(5.0)
+    in_h = handling_duration_minutes(10000)
+    print(f"cikis elleçleme: {out_h} dk (beklenen 100)")
+    print(f"yol suresi: {trav_m} dk (beklenen 300)")
+    print(f"varis elleçleme: {in_h} dk (beklenen 100)")
+    u = usage_hours(out_h, trav_m, in_h)
+    print(f"kullanim suresi: {u*60:.0f} dk (beklenen 500)")
+
+    # Resmi ornek 2: 1 saatlik bekleme eklenince
+    u2 = usage_hours(out_h, trav_m, in_h, waiting_min=60)
+    print(f"kullanim suresi (1s bekleme ile): {u2*60:.0f} dk (beklenen 560)")
+
+    # Yuvarlama ornegi: 0.92 saat = 55.2 dk -> 56 dk
+    print(f"\n0.92 saat -> {travel_minutes(0.92)} dk (beklenen 56)")
 
     deadline = sla_deadline(pd.Timestamp("2026-07-07 09:00:00"), 1)
-    print("deadline (1 gun):", deadline, "(beklenen 2026-07-08 09:00:00)")
+    print("\ndeadline (1 gun):", deadline, "(beklenen 2026-07-08 09:00:00)")
 
     delivered = pd.Timestamp("2026-07-08 10:00:00")
     dh = delay_hours_ceiled(delivered, deadline)

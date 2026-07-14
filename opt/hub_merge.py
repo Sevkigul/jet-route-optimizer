@@ -8,6 +8,11 @@ ayri sevkiyati (ayni gun, ayni hedef) ortak bir hub'da birlestirerek, her
 birinin kendi giris bacagini (origin->hub) ayri araclarla yapip, hub'dan
 hedefe TEK bir (daha dolu, dolayisiyla ucuz) arac ile devam etmelerini dener.
 
+Maliyet, organizasyon netlestirmesine gore "Kullanim Suresi" (cikis
+elleçleme + yolculuk + varis elleçleme) uzerinden hesaplanir. Sureler
+dakikaya yuvarlanir, elleçleme kapasitesi gece yarisini asarsa sureyle
+orantili bolunur.
+
 Performans notu: leg2'nin TEK bir arac ile cozulup cozulemeyecegini kontrol
 etmek icin PuLP/CBC (solve_spot) yerine dogrudan 4 arac tipini karsilastiran
 hafif bir fonksiyon (_cheapest_single_vehicle) kullanilir - CBC her cagrida
@@ -22,7 +27,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
-from costs import handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty
+from costs import (handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty,
+                    travel_minutes, usage_hours)
 
 # Degerler parametre taramasiyla bulundu (toplam maliyeti minimize eden nokta;
 # daha agresif degerlerde SLA cezasi artisi kazanci geciyor - bkz. proje notlari).
@@ -48,8 +54,9 @@ def _fill_ratio(d, vehicle_specs):
 
 def _cheapest_single_vehicle(desi, distance_km, travel_hours_by_type, vehicle_specs, truck_left):
     """CBC/MIP cagirmadan, 4 arac tipi arasinda TEK aracla tasinabilecek en
-    ucuz secenegi bulur. Kapasiteyi asan veya (Tir icin) tir kapasitesi
-    olmayan tipler elenir. Dondurur: (vehicle_type, cost) veya None."""
+    ucuz secenegi bulur (Kullanim Suresi = cikis+varis elleçleme + yolculuk
+    uzerinden). Kapasiteyi asan veya (Tir icin) tir kapasitesi olmayan tipler
+    elenir. Dondurur: (vehicle_type, cost) veya None."""
     best = None
     for vt in cfg.VEHICLE_TYPES:
         cap = vehicle_specs[vt]["capacity"]
@@ -57,7 +64,10 @@ def _cheapest_single_vehicle(desi, distance_km, travel_hours_by_type, vehicle_sp
             continue
         if vt == cfg.TRUCK_CAP_VEHICLE_TYPE and truck_left < 1:
             continue
-        cost = spot_cost(vt, distance_km, travel_hours_by_type[vt], vehicle_specs)
+        travel_min = travel_minutes(travel_hours_by_type[vt])
+        h = handling_duration_minutes(desi)
+        usage_hrs = usage_hours(h, travel_min, h)
+        cost = spot_cost(vt, distance_km, usage_hrs, vehicle_specs)
         if best is None or cost < best[1]:
             best = (vt, cost)
     return best
@@ -103,9 +113,9 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
                 ok_detour = False
                 break
             vt, cost1 = choice1
-            hours1 = travel_hours_by_type1[vt]
-            arrive1 = m["depart_at"] + pd.Timedelta(hours=hours1)
-            legs1.append({"member": m, "vt": vt, "hours1": hours1, "cost1": cost1, "arrive1": arrive1,
+            min1 = travel_minutes(travel_hours_by_type1[vt])
+            arrive1 = m["depart_at"] + pd.Timedelta(minutes=min1)
+            legs1.append({"member": m, "vt": vt, "min1": min1, "cost1": cost1, "arrive1": arrive1,
                           "origin_today": origin_today})
         if not ok_detour:
             continue
@@ -125,12 +135,13 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
         if leg2_choice is None:
             continue
         vt_leg2, cost2 = leg2_choice
+        min2 = travel_minutes(travel_hours_by_type[vt_leg2])
 
         alt_total_cost = sum(x["cost1"] for x in legs1) + cost2
         if alt_total_cost >= original_cost:
             continue
 
-        arrive2 = depart2 + pd.Timedelta(hours=travel_hours_by_type[vt_leg2])
+        arrive2 = depart2 + pd.Timedelta(minutes=min2)
         inbound_final = handling_duration_minutes(total_desi)
         new_delivered_at = arrive2 + pd.Timedelta(minutes=inbound_final)
 
@@ -146,22 +157,29 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
         if net_savings <= 0:
             continue
 
-        m_date = latest_arrival.normalize()
-        handling_needed = sum(m["carried_desi"] for m in members) + total_desi  # N indirme + 1 yukleme
-        ok = ledger.try_consume_handling(hub_m, m_date, handling_needed)
+        # elleçleme kapasitesi: N indirme (paralel/toplu, latest_arrival'da baslar)
+        # + 1 yukleme (indirmeler bitince baslar) - gece yarisi asarsa oranli bolunur
+        reload_start = latest_arrival + pd.Timedelta(minutes=unload_minutes)
+        unload_ok = ledger.try_consume_handling_timed(hub_m, latest_arrival, unload_minutes, total_desi)
+        reload_ok = ledger.try_consume_handling_timed(hub_m, reload_start, reload_minutes, total_desi) if unload_ok else False
+        ok = unload_ok and reload_ok
 
         truck_vid = "MERGE-" + "-".join(m["vehicle_internal_id"] for m in members)
         truck_ok = True
         if ok and vt_leg2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
+            m_date = latest_arrival.normalize()
             truck_ok = (ledger.try_consume_truck(hub_m, m_date, truck_vid)
                         and ledger.try_consume_truck(destination, arrive2.normalize(), truck_vid))
 
         if not ok or not truck_ok:
-            if ok:
-                ledger.release_handling(hub_m, m_date, handling_needed)
-                if vt_leg2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
-                    ledger.release_truck(hub_m, m_date, truck_vid)
-                    ledger.release_truck(destination, arrive2.normalize(), truck_vid)
+            if unload_ok:
+                ledger.release_handling_timed(hub_m, latest_arrival, unload_minutes, total_desi)
+            if reload_ok:
+                ledger.release_handling_timed(hub_m, reload_start, reload_minutes, total_desi)
+            if ok and vt_leg2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
+                m_date = latest_arrival.normalize()
+                ledger.release_truck(hub_m, m_date, truck_vid)
+                ledger.release_truck(destination, arrive2.normalize(), truck_vid)
             continue
 
         # leg1'de arac tipi degistiyse, cikis hub'inin tir kapasitesini buna
@@ -191,8 +209,10 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
                     ledger.release_truck(hub, date, vid)
                 else:
                     ledger.try_consume_truck(hub, date, vid)  # eski tuketimi geri koy
-            ledger.release_handling(hub_m, m_date, handling_needed)
+            ledger.release_handling_timed(hub_m, latest_arrival, unload_minutes, total_desi)
+            ledger.release_handling_timed(hub_m, reload_start, reload_minutes, total_desi)
             if vt_leg2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
+                m_date = latest_arrival.normalize()
                 ledger.release_truck(hub_m, m_date, truck_vid)
                 ledger.release_truck(destination, arrive2.normalize(), truck_vid)
             continue
@@ -201,15 +221,18 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
             "net_savings": net_savings,
             "hub_m": hub_m,
             "destination": destination,
-            "m_date": m_date,
+            "latest_arrival": latest_arrival,
+            "unload_minutes": unload_minutes,
+            "reload_start": reload_start,
+            "reload_minutes": reload_minutes,
+            "total_desi": total_desi,
             "dest_date": arrive2.normalize(),
-            "handling_needed": handling_needed,
             "vt_leg2": vt_leg2,
             "truck_vid": truck_vid,
             "origin_truck_applied": origin_truck_applied,
             "legs": _build_legs(legs1, hub_m, destination, vt_leg2, cost2, depart2, arrive2,
                                  total_desi, unload_minutes, reload_minutes, new_delivered_at,
-                                 travel_hours_by_type[vt_leg2]),
+                                 min2),
         }
         if best is None or candidate["net_savings"] > best["net_savings"]:
             if best is not None:
@@ -222,7 +245,7 @@ def _try_group_merge(members, destination, distance, vehicle_specs, ledger, dema
 
 
 def _build_legs(legs1, hub_m, destination, vt_leg2, cost2, depart2, arrive2,
-                 total_desi, unload_minutes, reload_minutes, new_delivered_at, travel_hours2):
+                 total_desi, unload_minutes, reload_minutes, new_delivered_at, travel_min2):
     legs = []
     all_portions = []
     for x in legs1:
@@ -232,7 +255,7 @@ def _build_legs(legs1, hub_m, destination, vt_leg2, cost2, depart2, arrive2,
             "vehicle_internal_id": f"{m['vehicle_internal_id']}-M1",
             "vehicle_class": "Spot", "vehicle_type": x["vt"],
             "origin": m["origin"], "destination": hub_m,
-            "depart_at": m["depart_at"], "arrive_at": x["arrive1"], "travel_hours": x["hours1"],
+            "depart_at": m["depart_at"], "arrive_at": x["arrive1"], "travel_hours": x["min1"] / 60.0,
             "outbound_handling_min": m["outbound_handling_min"],
             "inbound_handling_min": inbound,
             "delivered_at": x["arrive1"] + pd.Timedelta(minutes=inbound),
@@ -248,7 +271,7 @@ def _build_legs(legs1, hub_m, destination, vt_leg2, cost2, depart2, arrive2,
         # sekilde her uyenin kendi zincirini ayirt edebilir (yanlislikla split sayilmaz).
         "vehicle_class": "Spot", "vehicle_type": vt_leg2,
         "origin": hub_m, "destination": destination,
-        "depart_at": depart2, "arrive_at": arrive2, "travel_hours": travel_hours2,
+        "depart_at": depart2, "arrive_at": arrive2, "travel_hours": travel_min2 / 60.0,
         "outbound_handling_min": unload_minutes + reload_minutes,
         "inbound_handling_min": handling_duration_minutes(total_desi),
         "delivered_at": new_delivered_at,
@@ -258,9 +281,13 @@ def _build_legs(legs1, hub_m, destination, vt_leg2, cost2, depart2, arrive2,
 
 
 def _rollback(candidate, ledger):
-    ledger.release_handling(candidate["hub_m"], candidate["m_date"], candidate["handling_needed"])
+    ledger.release_handling_timed(candidate["hub_m"], candidate["latest_arrival"],
+                                   candidate["unload_minutes"], candidate["total_desi"])
+    ledger.release_handling_timed(candidate["hub_m"], candidate["reload_start"],
+                                   candidate["reload_minutes"], candidate["total_desi"])
     if candidate["vt_leg2"] == cfg.TRUCK_CAP_VEHICLE_TYPE:
-        ledger.release_truck(candidate["hub_m"], candidate["m_date"], candidate["truck_vid"])
+        m_date = candidate["latest_arrival"].normalize()
+        ledger.release_truck(candidate["hub_m"], m_date, candidate["truck_vid"])
         ledger.release_truck(candidate["destination"], candidate["dest_date"], candidate["truck_vid"])
     for action, hub, date, vid in candidate.get("origin_truck_applied", []):
         if action == "consume":

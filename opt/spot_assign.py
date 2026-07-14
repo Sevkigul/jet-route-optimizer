@@ -1,5 +1,17 @@
 """Spot arac MIP - verilen desi miktarini en ucuza arac tipi/sayisina dagitir.
 
+Maliyet artik SADECE yolculuga bagli degil - "Kullanim Suresi" (cikis
+elleçleme + yolculuk + varis elleçleme) uzerinden hesaplaniyor (organizasyon
+netlestirmesi). Elleçleme suresi TASINAN DESIYE bagli oldugundan, her aracin
+maliyeti artik SABIT (rota/tip bazli) + DEGISKEN (o aracin kendi yukune
+bagli, elleçleme uzerinden) bilesenlerinin toplami - ikisi de DESI'de
+DOGRUSAL oldugundan (yuvarlama etkisi ihmal edilebilir buyuklukte), MIP
+yine dogrusal kalir:
+
+    arac_basina_maliyet(y) = FIXED[tip] + VARIABLE[tip] * y
+    FIXED[tip]    = saatlik_ucret[tip] * (yol_dakika[tip]/60) + km_ucret[tip]*mesafe
+    VARIABLE[tip] = saatlik_ucret[tip] * (2*HANDLING_MIN_PER_DESI/60)   (cikis+varis elleçleme)
+
 Eski asamadaki solve_spot'un genisletilmesi: %10 min-doluluk kisiti YOK
 (bu asamanin PDF'inde boyle bir kural yok), spot Tir sayisi ise
 truck_remaining (hem cikis hem varis hub'inin tir kapasitesi) ile sinirli.
@@ -11,7 +23,17 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, value, PULP_CBC_CMD
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
-from costs import spot_cost
+from costs import travel_minutes
+
+
+def _fixed_variable_cost(vt, distance_km, travel_hours_by_type, vehicle_specs, pricing="spot"):
+    s = vehicle_specs[vt]
+    hourly = s[f"{pricing}_hourly"]
+    km_rate = s[f"{pricing}_km"]
+    travel_min = travel_minutes(travel_hours_by_type[vt])
+    fixed = hourly * (travel_min / 60.0) + km_rate * distance_km
+    variable_per_desi = hourly * (2 * cfg.HANDLING_MIN_PER_DESI / 60.0)
+    return fixed, variable_per_desi
 
 
 def solve_spot(remaining_desi, distance_km, travel_hours_by_type, vehicle_specs,
@@ -25,16 +47,18 @@ def solve_spot(remaining_desi, distance_km, travel_hours_by_type, vehicle_specs,
     if remaining_desi <= 1e-9:
         return empty
 
-    unit_cost = {
-        vt: spot_cost(vt, distance_km, travel_hours_by_type[vt], vehicle_specs)
-        for vt in vehicle_types
-    }
+    fixed_cost = {}
+    var_cost = {}
+    for vt in vehicle_types:
+        fixed_cost[vt], var_cost[vt] = _fixed_variable_cost(
+            vt, distance_km, travel_hours_by_type, vehicle_specs, pricing="spot"
+        )
 
     prob = LpProblem("spot_assign", LpMinimize)
     x = {vt: LpVariable(f"x_{vt}", lowBound=0, cat="Integer") for vt in vehicle_types}
     y = {vt: LpVariable(f"y_{vt}", lowBound=0) for vt in vehicle_types}
 
-    prob += lpSum(unit_cost[vt] * x[vt] for vt in vehicle_types)
+    prob += lpSum(fixed_cost[vt] * x[vt] + var_cost[vt] * y[vt] for vt in vehicle_types)
     prob += lpSum(y[vt] for vt in vehicle_types) == remaining_desi
     for vt in vehicle_types:
         cap = vehicle_specs[vt]["capacity"]

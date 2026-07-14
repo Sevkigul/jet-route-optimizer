@@ -16,6 +16,11 @@ Kapsam ve bilincli sinirlamalar:
   denenir (try_consume); herhangi biri basarisiz olursa VEYA net kazanc
   pozitif degilse tum degisiklikler geri alinir (rollback) ve orijinal
   sevkiyat degismeden birakilir.
+
+Maliyet, organizasyon netlestirmesine gore "Kullanim Suresi" (cikis
+elleçleme + yolculuk + varis elleçleme) uzerinden hesaplanir - sadece
+yolculuk suresi degil. Elleçleme kapasitesi tuketimi, gece yarisini
+asan islemler icin sureyle orantili bolunur (try_consume_handling_timed).
 """
 import sys
 from pathlib import Path
@@ -24,7 +29,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
-from costs import handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty
+from costs import (handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty,
+                    travel_minutes, usage_hours)
 
 LOW_FILL_THRESHOLD = 0.5
 MAX_DETOUR_RATIO = 2.0   # dist(o,m)+dist(m,d) <= bu oran * dist(o,d) olmali
@@ -54,38 +60,43 @@ def _try_candidate(d, hub_m, distance, vehicle_specs, ledger, demand_lookup):
     if km1 + km2 > MAX_DETOUR_RATIO * direct_km:
         return None
 
-    hours1 = distance[(origin, hub_m)]["duration"][vt]
-    hours2 = distance[(hub_m, destination)]["duration"][vt]
+    hours1 = travel_minutes(distance[(origin, hub_m)]["duration"][vt]) / 60.0
+    hours2 = travel_minutes(distance[(hub_m, destination)]["duration"][vt]) / 60.0
+    min1 = round(hours1 * 60)
+    min2 = round(hours2 * 60)
 
-    cost1 = spot_cost(vt, km1, hours1, vehicle_specs)
-    cost2 = spot_cost(vt, km2, hours2, vehicle_specs)
-    alt_cost = cost1 + cost2
-    if alt_cost >= d["cost"]:
-        return None
-
-    # zamanlama
+    # zamanlama (once, maliyet hesabinda kullanilan Kullanim Suresi icin gerekli)
     depart1 = d["depart_at"]
-    arrive1 = depart1 + pd.Timedelta(hours=hours1)
+    arrive1 = depart1 + pd.Timedelta(minutes=min1)
     handling_m = handling_duration_minutes(carried)   # indirme
     handling_m2 = handling_duration_minutes(carried)  # yeniden yukleme
     depart2 = arrive1 + pd.Timedelta(minutes=handling_m + handling_m2)
-    arrive2 = depart2 + pd.Timedelta(hours=hours2)
+    arrive2 = depart2 + pd.Timedelta(minutes=min2)
     inbound_final = handling_duration_minutes(carried)
     new_delivered_at = arrive2 + pd.Timedelta(minutes=inbound_final)
+
+    usage1 = usage_hours(d["outbound_handling_min"], min1, handling_m)
+    usage2 = usage_hours(handling_m2, min2, inbound_final)
+    cost1 = spot_cost(vt, km1, usage1, vehicle_specs)
+    cost2 = spot_cost(vt, km2, usage2, vehicle_specs)
+    alt_cost = cost1 + cost2
+    if alt_cost >= d["cost"]:
+        return None
 
     sla_delta = _portion_sla_delta(d["portions"], demand_lookup, d["delivered_at"], new_delivered_at)
     net_savings = (d["cost"] - alt_cost) - sla_delta
     if net_savings <= 0:
         return None
 
-    # --- transactional ledger denemesi (sadece GERCEKTEN tuketilen kadar iade edilir) ---
-    m_date = arrive1.normalize()
-    handling_ok1 = ledger.try_consume_handling(hub_m, m_date, carried)
-    handling_ok2 = ledger.try_consume_handling(hub_m, m_date, carried) if handling_ok1 else False
+    # --- transactional ledger denemesi (indirme ve yeniden yukleme, sureyle orantili) ---
+    handling_ok1 = ledger.try_consume_handling_timed(hub_m, arrive1, handling_m, carried)
+    reload_start = arrive1 + pd.Timedelta(minutes=handling_m)
+    handling_ok2 = ledger.try_consume_handling_timed(hub_m, reload_start, handling_m2, carried) if handling_ok1 else False
     ok = handling_ok1 and handling_ok2
 
     truck_ids_consumed = []
     if ok and vt == cfg.TRUCK_CAP_VEHICLE_TYPE:
+        m_date = arrive1.normalize()
         leg1_vid = f"CONSOL-{d['vehicle_internal_id']}-leg1-arr"
         leg2_vid = f"CONSOL-{d['vehicle_internal_id']}-leg2-dep"
         ok1 = ledger.try_consume_truck(hub_m, m_date, leg1_vid)
@@ -98,9 +109,10 @@ def _try_candidate(d, hub_m, distance, vehicle_specs, ledger, demand_lookup):
 
     if not ok:
         # geri al: sadece bu asamaya kadar GERCEKTEN tuketilmis olan kadar iade et
-        consumed_handling = (1 if handling_ok1 else 0) + (1 if handling_ok2 else 0)
-        if consumed_handling:
-            ledger.release_handling(hub_m, m_date, consumed_handling * carried)
+        if handling_ok1:
+            ledger.release_handling_timed(hub_m, arrive1, handling_m, carried)
+        if handling_ok2:
+            ledger.release_handling_timed(hub_m, reload_start, handling_m2, carried)
         for hub, date, vid in truck_ids_consumed:
             ledger.release_truck(hub, date, vid)
         return None
@@ -137,7 +149,16 @@ def _try_candidate(d, hub_m, distance, vehicle_specs, ledger, demand_lookup):
         "carried_desi": carried,
         "portions": d["portions"],
     }
-    return {"net_savings": net_savings, "legs": [leg1, leg2]}
+    return {
+        "net_savings": net_savings,
+        "legs": [leg1, leg2],
+        "_rollback": {
+            "hub_m": hub_m, "arrive1": arrive1, "handling_m": handling_m,
+            "reload_start": reload_start, "handling_m2": handling_m2,
+            "carried": carried, "vehicle_type": vt,
+            "vehicle_internal_id": d["vehicle_internal_id"],
+        },
+    }
 
 
 def run_consolidation(dispatches, distance, vehicle_specs, ledger, demand_lookup, hubs):
@@ -187,11 +208,10 @@ def run_consolidation(dispatches, distance, vehicle_specs, ledger, demand_lookup
 
 
 def _rollback_candidate(candidate, ledger):
-    leg1, leg2 = candidate["legs"]
-    hub_m = leg1["destination"]
-    m_date = leg1["arrive_at"].normalize()
-    carried = leg1["carried_desi"]
-    ledger.release_handling(hub_m, m_date, 2 * carried)
-    if leg1["vehicle_type"] == cfg.TRUCK_CAP_VEHICLE_TYPE:
-        ledger.release_truck(hub_m, m_date, f"CONSOL-{leg1['vehicle_internal_id'].rsplit('-C1',1)[0]}-leg1-arr")
-        ledger.release_truck(hub_m, m_date, f"CONSOL-{leg1['vehicle_internal_id'].rsplit('-C1',1)[0]}-leg2-dep")
+    r = candidate["_rollback"]
+    ledger.release_handling_timed(r["hub_m"], r["arrive1"], r["handling_m"], r["carried"])
+    ledger.release_handling_timed(r["hub_m"], r["reload_start"], r["handling_m2"], r["carried"])
+    if r["vehicle_type"] == cfg.TRUCK_CAP_VEHICLE_TYPE:
+        m_date = r["arrive1"].normalize()
+        ledger.release_truck(r["hub_m"], m_date, f"CONSOL-{r['vehicle_internal_id']}-leg1-arr")
+        ledger.release_truck(r["hub_m"], m_date, f"CONSOL-{r['vehicle_internal_id']}-leg2-dep")

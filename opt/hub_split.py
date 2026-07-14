@@ -8,6 +8,9 @@ Bu modul ise AYNI CIKISTAN FARKLI HEDEFLERE giden dusuk-dolu sevkiyatlari
 ortak bir hub'a kadar TEK (birlesik, daha dolu) bir aracla tasiyip, hub'dan
 itibaren her biri kendi hedefine kendi araciyla devam ediyor (N sevkiyat ->
 1 ortak leg1 + N kendi leg2). Ayni ekonomik mantik, ters yonde.
+
+Maliyet "Kullanim Suresi" (elleçleme+yolculuk) uzerinden, sureler dakikaya
+yuvarlanir, elleçleme kapasitesi gece yarisini asarsa oranli bolunur.
 """
 import sys
 from itertools import combinations
@@ -17,7 +20,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
-from costs import handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty
+from costs import handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty, travel_minutes
 from hub_merge import _cheapest_single_vehicle, _fill_ratio
 
 LOW_FILL_THRESHOLD = 0.90
@@ -52,9 +55,10 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
         if leg1_choice is None:
             continue
         vt1, cost1 = leg1_choice
-        hours1 = travel_hours_by_type1[vt1]
-        shared_arrive1 = shared_depart1 + pd.Timedelta(hours=hours1)
+        min1 = travel_minutes(travel_hours_by_type1[vt1])
+        shared_arrive1 = shared_depart1 + pd.Timedelta(minutes=min1)
         unload_minutes = handling_duration_minutes(total_desi)
+        reload_start = shared_arrive1 + pd.Timedelta(minutes=unload_minutes)
 
         ok_detour = True
         legs2 = []
@@ -65,7 +69,8 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
                 ok_detour = False
                 break
             travel_hours_by_type2 = distance[(hub_m, m["destination"])]["duration"]
-            depart2 = shared_arrive1 + pd.Timedelta(minutes=unload_minutes + handling_duration_minutes(m["carried_desi"]))
+            own_reload = handling_duration_minutes(m["carried_desi"])
+            depart2 = reload_start + pd.Timedelta(minutes=own_reload)
             dest_today = depart2.normalize()
             truck_left_dest = ledger.truck_remaining(m["destination"], dest_today)
             truck_left_hub = ledger.truck_remaining(hub_m, dest_today)
@@ -75,14 +80,14 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
                 ok_detour = False
                 break
             vt2, cost2 = choice2
-            hours2 = travel_hours_by_type2[vt2]
-            arrive2 = depart2 + pd.Timedelta(hours=hours2)
+            min2 = travel_minutes(travel_hours_by_type2[vt2])
+            arrive2 = depart2 + pd.Timedelta(minutes=min2)
             inbound_final = handling_duration_minutes(m["carried_desi"])
             legs2.append({
-                "member": m, "vt": vt2, "hours2": hours2, "cost2": cost2,
+                "member": m, "vt": vt2, "min2": min2, "cost2": cost2,
                 "depart2": depart2, "arrive2": arrive2,
                 "delivered_at": arrive2 + pd.Timedelta(minutes=inbound_final),
-                "reload_minutes": handling_duration_minutes(m["carried_desi"]),
+                "reload_minutes": own_reload,
             })
         if not ok_detour:
             continue
@@ -104,9 +109,20 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
         if net_savings <= 0:
             continue
 
-        m_date = shared_arrive1.normalize()
-        handling_needed = total_desi + sum(m["carried_desi"] for m in members)  # 1 indirme + N yukleme
-        ok = ledger.try_consume_handling(hub_m, m_date, handling_needed)
+        # elleçleme: 1 ortak indirme (unload_minutes, shared_arrive1'de baslar)
+        # + her uye icin AYRI (paralel) yukleme (kendi reload_minutes'i, reload_start'ta baslar)
+        unload_ok = ledger.try_consume_handling_timed(hub_m, shared_arrive1, unload_minutes, total_desi)
+        reload_ops = []
+        reload_ok = True
+        if unload_ok:
+            for x in legs2:
+                m = x["member"]
+                if ledger.try_consume_handling_timed(hub_m, reload_start, x["reload_minutes"], m["carried_desi"]):
+                    reload_ops.append((hub_m, reload_start, x["reload_minutes"], m["carried_desi"]))
+                else:
+                    reload_ok = False
+                    break
+        ok = unload_ok and reload_ok
 
         leg1_vid = "SPLIT1-" + "-".join(m["vehicle_internal_id"] for m in members)
         truck_ops = []
@@ -114,10 +130,10 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
         if ok and vt1 == cfg.TRUCK_CAP_VEHICLE_TYPE:
             truck_ok = ledger.try_consume_truck(origin, today, leg1_vid)
             if truck_ok:
-                truck_ok = ledger.try_consume_truck(hub_m, m_date, leg1_vid)
+                truck_ok = ledger.try_consume_truck(hub_m, shared_arrive1.normalize(), leg1_vid)
                 if truck_ok:
                     truck_ops.append((origin, today, leg1_vid))
-                    truck_ops.append((hub_m, m_date, leg1_vid))
+                    truck_ops.append((hub_m, shared_arrive1.normalize(), leg1_vid))
                 else:
                     ledger.release_truck(origin, today, leg1_vid)
 
@@ -137,8 +153,10 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
                         break
 
         if not ok or not truck_ok or not leg2_truck_ok:
-            if ok:
-                ledger.release_handling(hub_m, m_date, handling_needed)
+            if unload_ok:
+                ledger.release_handling_timed(hub_m, shared_arrive1, unload_minutes, total_desi)
+            for hub, start, dur, desi in reload_ops:
+                ledger.release_handling_timed(hub, start, dur, desi)
             for hub, date, vid in truck_ops:
                 ledger.release_truck(hub, date, vid)
             continue
@@ -146,11 +164,13 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
         candidate = {
             "net_savings": net_savings,
             "hub_m": hub_m,
-            "m_date": m_date,
-            "handling_needed": handling_needed,
+            "shared_arrive1": shared_arrive1,
+            "unload_minutes": unload_minutes,
+            "total_desi": total_desi,
+            "reload_ops": reload_ops,
             "truck_ops": truck_ops,
             "legs": _build_legs(members, origin, hub_m, vt1, cost1, shared_depart1, shared_arrive1,
-                                 hours1, total_desi, unload_minutes, legs2),
+                                 min1, total_desi, unload_minutes, legs2),
         }
         if best is None or candidate["net_savings"] > best["net_savings"]:
             if best is not None:
@@ -162,7 +182,7 @@ def _try_group_split(members, origin, distance, vehicle_specs, ledger, demand_lo
     return best
 
 
-def _build_legs(members, origin, hub_m, vt1, cost1, depart1, arrive1, hours1,
+def _build_legs(members, origin, hub_m, vt1, cost1, depart1, arrive1, min1,
                  total_desi, unload_minutes, legs2):
     combined_id = "SPLIT-" + "-".join(m["vehicle_internal_id"] for m in members) + "-M1"
     outbound1 = handling_duration_minutes(total_desi)
@@ -170,7 +190,7 @@ def _build_legs(members, origin, hub_m, vt1, cost1, depart1, arrive1, hours1,
         "vehicle_internal_id": combined_id,
         "vehicle_class": "Spot", "vehicle_type": vt1,
         "origin": origin, "destination": hub_m,
-        "depart_at": depart1, "arrive_at": arrive1, "travel_hours": hours1,
+        "depart_at": depart1, "arrive_at": arrive1, "travel_hours": min1 / 60.0,
         "outbound_handling_min": outbound1,
         "inbound_handling_min": unload_minutes,
         "delivered_at": arrive1 + pd.Timedelta(minutes=unload_minutes),
@@ -183,7 +203,7 @@ def _build_legs(members, origin, hub_m, vt1, cost1, depart1, arrive1, hours1,
             "vehicle_internal_id": f"{m['vehicle_internal_id']}-M2",
             "vehicle_class": "Spot", "vehicle_type": x["vt"],
             "origin": hub_m, "destination": m["destination"],
-            "depart_at": x["depart2"], "arrive_at": x["arrive2"], "travel_hours": x["hours2"],
+            "depart_at": x["depart2"], "arrive_at": x["arrive2"], "travel_hours": x["min2"] / 60.0,
             "outbound_handling_min": x["reload_minutes"],
             "inbound_handling_min": handling_duration_minutes(m["carried_desi"]),
             "delivered_at": x["delivered_at"],
@@ -193,7 +213,10 @@ def _build_legs(members, origin, hub_m, vt1, cost1, depart1, arrive1, hours1,
 
 
 def _rollback(candidate, ledger):
-    ledger.release_handling(candidate["hub_m"], candidate["m_date"], candidate["handling_needed"])
+    ledger.release_handling_timed(candidate["hub_m"], candidate["shared_arrive1"],
+                                   candidate["unload_minutes"], candidate["total_desi"])
+    for hub, start, dur, desi in candidate["reload_ops"]:
+        ledger.release_handling_timed(hub, start, dur, desi)
     for hub, date, vid in candidate["truck_ops"]:
         ledger.release_truck(hub, date, vid)
 

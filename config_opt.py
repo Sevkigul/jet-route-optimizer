@@ -1,10 +1,11 @@
 """Rota/arac optimizasyonu icin tum ayarlanabilir degerler tek yerde.
 
-RENTAL_EXEMPT_FROM_TRUCK_CAP: veri setinde bir celiski var - bazi hublarda
-tir_kapasitesi=0 ama oraya zorunlu kiralik Tir rotasi tanimli (orn.
-Istanbul->Balikesir). Kullaniciyla netlestik: kiralik araclar tir kapasitesi
-kisitindan muaf sayilir, sadece spot Tir araclari bu limite tabi olur.
-Organizasyondan netlik gelirse tek satir degisir.
+RENTAL_EXEMPT_FROM_TRUCK_CAP: ARTIK KAPALI (False). Organizasyon Soru-Cevap
+oturumunda acikca dogruladi: "Kiralik araclar da tir kapasitesini tuketir."
+Onceki celiski (Balikesir=0, Tekirdag=1 ama zorunlu kiralik Tir talebi bunu
+astigi icin) organizasyon tarafindan tir_kapasiteleri v2 dosyasiyla
+COZULDU (Balikesir 0->1, Tekirdag 1->2 - tam da zorunlu kiralik yukune
+denk geliyor). Artik muafiyete gerek yok.
 """
 from pathlib import Path
 
@@ -16,7 +17,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT_DIR / "outputs"
 
 HANDLING_CAPACITY_FILE = ROOT_DIR / "Ellecleme-kapasite.xlsx"
-TRUCK_CAPACITY_FILE = ROOT_DIR / "tir_kapasiteleri.xlsx"
+TRUCK_CAPACITY_FILE = ROOT_DIR / "tir_kapasiteleri v2.xlsx"
 RENTAL_FILE = ROOT_DIR / "Kiralık_Araclar.xlsx"
 VEHICLE_SPEC_FILE = ROOT_DIR / "Araç_Kapasite_Maliyet_Saat.xlsx"
 DISTANCE_FILE = ROOT_DIR / "sehirler_arasi_lojistik.xlsx"
@@ -35,9 +36,9 @@ HANDLING_MIN_PER_DESI = 0.01   # dakika / desi
 # --- SLA cezasi -------------------------------------------------------------
 SLA_TL_PER_DESI_HOUR = 0.4
 
-# --- Tir kapasitesi varsayimi (bkz. yukaridaki docstring) ------------------
-RENTAL_EXEMPT_FROM_TRUCK_CAP = True
-TRUCK_CAP_VEHICLE_TYPE = "Tır"   # kapasite sadece bu arac tipini sinirlar
+# --- Tir kapasitesi (bkz. yukaridaki docstring) ----------------------------
+RENTAL_EXEMPT_FROM_TRUCK_CAP = False
+TRUCK_CAP_VEHICLE_TYPE = "Tır"   # kapasite sadece bu arac tipini sinirlar (organizasyon dogruladi)
 
 # --- Kiralik arac varsayilan cikis saati (talep sifir olsa bile) -----------
 RENTAL_DEFAULT_HOUR = 9
@@ -59,9 +60,11 @@ RENTAL_DEFAULT_HOUR = 9
 # anlamina gelir - SLA cezasi bu veri setinde (0.4 TL/desi/saat) arac
 # maliyetine kiyasla ucuz oldugundan, bu bilincli bir maliyet tercihi).
 # Degerler parametre taramasiyla (fill_threshold x safety_hours grid search)
-# bulundu - toplam maliyeti (arac + SLA cezasi) minimize eden nokta.
-MIN_FILL_THRESHOLD = 0.65
-SLA_SAFETY_HOURS = -4
+# bulundu - toplam maliyeti (arac + SLA cezasi) minimize eden nokta. Yeni
+# "Kullanim Suresi" maliyet modeli (elleçleme+bekleme dahil) sonrasi
+# yeniden taranip guncellendi (eski deger 0.65/-4 idi).
+MIN_FILL_THRESHOLD = 0.50
+SLA_SAFETY_HOURS = -2
 
 # --- Konsolidasyon ----------------------------------------------------------
 CONSOLIDATION_MAX_HOPS = 1   # sadece 1-hop (A->B->C) trans-shipment aranir
@@ -72,6 +75,6 @@ VEHICLE_TYPES = ["Tır", "Kamyon", "Hafif Kamyon", "Kamyonet"]
 
 # --- Cikti bicimlendirme ---------------------------------------------------
 OUTPUT_DATE_FORMAT = "%d.%m.%Y"
-OUTPUT_TIME_FORMAT = "%H:%M:%S"
+OUTPUT_TIME_FORMAT = "%H:%M"   # organizasyon netlestirmesi: "SS:DD yeterli" (saniyeye gerek yok)
 COST_ROUND_DECIMALS = 2
 DESI_ROUND_DECIMALS = 1

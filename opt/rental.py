@@ -19,7 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
-from costs import handling_duration_minutes, rental_cost
+from costs import handling_duration_minutes, rental_cost, travel_minutes, usage_hours
 from portions import consume_fifo
 
 
@@ -60,21 +60,33 @@ def dispatch_rentals_for_day(route, date, fleet_types, vehicle_specs, distance, 
 
         # elleçleme suresi HER ARACIN KENDI yukune gore hesaplanir (PDF: "bir arac
         # icerisinde tasinan tum gonderiler icin elleçleme ayni anda baslar/biter" -
-        # yani sure o aracin kendi desisine bagli, diger araclarin yukune degil)
+        # yani sure o aracin kendi desisine bagli, diger araclarin yukune degil).
+        # Tum sureler dakikaya yuvarlanir (organizasyon netlestirmesi).
         outbound_handling = handling_duration_minutes(share)
         depart_at = day_1700 + pd.Timedelta(minutes=outbound_handling)
 
-        travel_hours = dist_info["duration"][vt]
-        arrive_at = depart_at + pd.Timedelta(hours=travel_hours)
+        travel_hrs = dist_info["duration"][vt]
+        travel_min = travel_minutes(travel_hrs)
+        arrive_at = depart_at + pd.Timedelta(minutes=travel_min)
         inbound_handling = handling_duration_minutes(share)
 
-        cost = rental_cost(vt, distance_km, travel_hours, vehicle_specs)
+        # Kullanim Suresi = cikis elleçleme + yolculuk + varis elleçleme (organizasyon netlestirmesi)
+        usage_hrs = usage_hours(outbound_handling, travel_min, inbound_handling)
+        cost = rental_cost(vt, distance_km, usage_hrs, vehicle_specs)
 
-        # elleçleme kapasitesini kosulsuz tuket (zorunlu sevkiyat)
-        ledger.force_consume_handling(origin, date.normalize(), share)
-        ledger.force_consume_handling(destination, arrive_at.normalize(), share)
+        # elleçleme kapasitesini kosulsuz tuket (zorunlu sevkiyat), gece yarisini
+        # asarsa sureyle orantili olarak ilgili gunlere bolunur.
+        ledger.force_consume_handling_timed(origin, day_1700, outbound_handling, share)
+        ledger.force_consume_handling_timed(destination, arrive_at, inbound_handling, share)
 
         vehicle_id = f"R-{origin}-{destination}-{date.date()}-{idx}"
+
+        # Tir kapasitesi: kiralik araclar da tuketir (organizasyon dogruladi),
+        # zorunlu oldugundan kosulsuz (force) tuketilir.
+        if vt == cfg.TRUCK_CAP_VEHICLE_TYPE:
+            ledger.force_consume_truck(origin, depart_at.normalize(), vehicle_id)
+            ledger.force_consume_truck(destination, arrive_at.normalize(), vehicle_id)
+
         dispatches.append({
             "vehicle_internal_id": vehicle_id,
             "vehicle_class": "Kiralık",
@@ -83,7 +95,7 @@ def dispatch_rentals_for_day(route, date, fleet_types, vehicle_specs, distance, 
             "destination": destination,
             "depart_at": depart_at,
             "arrive_at": arrive_at,
-            "travel_hours": travel_hours,
+            "travel_hours": travel_min / 60.0,
             "outbound_handling_min": outbound_handling,
             "inbound_handling_min": inbound_handling,
             "delivered_at": arrive_at + pd.Timedelta(minutes=inbound_handling),

@@ -10,8 +10,9 @@ soru-cevapta acikca izin verilen bir konsolidasyon deseni (Q&A #2).
 Basitlestirme: eklenen yukun kiraligin kendi elleçleme suresine (dolayisiyla
 depart/arrive saatlerine) etkisi ihmal edilir (tipik olarak birkac desi
 icin birkac dakika farkeder) - sadece elleçleme KAPASITESI tuketimi dogru
-sekilde guncellenir. Kiraligin kendi maliyeti ZATEN sabit oldugundan
-(yuke bagli degil), bu adayin tek maliyeti candidate'in leg2'sidir.
+sekilde (ve gece yarisini asarsa oranli) guncellenir. Kiraligin kendi
+maliyeti ZATEN sabit oldugundan (yuke bagli degil), bu adayin tek maliyeti
+candidate'in leg2'sidir.
 """
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config_opt as cfg
-from costs import handling_duration_minutes, delay_hours_ceiled, sla_penalty
+from costs import handling_duration_minutes, delay_hours_ceiled, sla_penalty, travel_minutes
 from hub_merge import _cheapest_single_vehicle, _fill_ratio
 
 LOW_FILL_THRESHOLD = 0.90
@@ -60,8 +61,8 @@ def _try_piggyback(rental_d, candidate, distance, vehicle_specs, ledger, demand_
     if cost2 >= candidate["cost"]:
         return None
 
-    hours2 = travel_hours_by_type2[vt2]
-    arrive2 = depart2 + pd.Timedelta(hours=hours2)
+    min2 = travel_minutes(travel_hours_by_type2[vt2])
+    arrive2 = depart2 + pd.Timedelta(minutes=min2)
     inbound_final = handling_duration_minutes(candidate["carried_desi"])
     new_delivered_at = arrive2 + pd.Timedelta(minutes=inbound_final)
 
@@ -77,6 +78,8 @@ def _try_piggyback(rental_d, candidate, distance, vehicle_specs, ledger, demand_
         return None
 
     # --- ledger: once candidate'in ESKI (artik gecersiz) tuketimini iade et ---
+    # (candidate'in orijinal cikis elleclemesi aggregate/gun bazinda tutuldugundan
+    # tam sureyle-orantili tersine cevrilemez - en iyi yaklasiklikla duz gun bazinda iade edilir)
     old_origin_today = candidate["depart_at"].normalize()
     old_dest_today = candidate["arrive_at"].normalize()
     ledger.release_handling(candidate["origin"], old_origin_today, candidate["carried_desi"])
@@ -85,34 +88,47 @@ def _try_piggyback(rental_d, candidate, distance, vehicle_specs, ledger, demand_
         ledger.release_truck(candidate["origin"], old_origin_today, candidate["vehicle_internal_id"])
         ledger.release_truck(candidate["destination"], old_dest_today, candidate["vehicle_internal_id"])
 
-    # --- sonra kiraligin EKSTRA elleçleme tuketimini ekle (cikis+varisinda) ---
-    origin_today = rental_d["depart_at"].normalize()
-    hub_today = rental_d["arrive_at"].normalize()
-    ledger.force_consume_handling(rental_d["origin"], origin_today, candidate["carried_desi"])
-    ledger.force_consume_handling(hub_m, hub_today, candidate["carried_desi"])
+    # --- sonra kiraligin EKSTRA elleçleme tuketimini ekle (rentalin KENDI
+    # elleçleme penceresi icinde, gece yarisini asarsa oranli bolunur) ---
+    origin_start = rental_d["depart_at"] - pd.Timedelta(minutes=rental_d["outbound_handling_min"])
+    hub_start = rental_d["arrive_at"]
+    ok_origin = ledger.try_consume_handling_timed(
+        rental_d["origin"], origin_start, rental_d["outbound_handling_min"], candidate["carried_desi"])
+    ok_hub = ledger.try_consume_handling_timed(
+        hub_m, hub_start, rental_d["inbound_handling_min"], candidate["carried_desi"]) if ok_origin else False
+    # candidate'in YENI (leg2) varis elleclemesi, gercek varis noktasinda (final_dest)
+    ok_final = ledger.try_consume_handling_timed(
+        final_dest, arrive2, inbound_final, candidate["carried_desi"]) if ok_hub else False
+    ok = ok_origin and ok_hub and ok_final
 
     truck_vid = f"PIGGY-{rental_d['vehicle_internal_id']}-{candidate['vehicle_internal_id']}"
     truck_ok = True
-    if vt2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
+    if ok and vt2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
         truck_ok = ledger.try_consume_truck(hub_m, today2, truck_vid) and ledger.try_consume_truck(final_dest, arrive2.normalize(), truck_vid)
-        if not truck_ok:
+
+    if not ok or not truck_ok:
+        if truck_ok is False and vt2 == cfg.TRUCK_CAP_VEHICLE_TYPE:
             ledger.release_truck(hub_m, today2, truck_vid)
             ledger.release_truck(final_dest, arrive2.normalize(), truck_vid)
-            ledger.release_handling(rental_d["origin"], origin_today, candidate["carried_desi"])
-            ledger.release_handling(hub_m, hub_today, candidate["carried_desi"])
-            # candidate'in eski tuketimini geri koy (bu aday reddedildi)
-            ledger.force_consume_handling(candidate["origin"], old_origin_today, candidate["carried_desi"])
-            ledger.force_consume_handling(candidate["destination"], old_dest_today, candidate["carried_desi"])
-            if candidate["vehicle_type"] == cfg.TRUCK_CAP_VEHICLE_TYPE:
-                ledger.try_consume_truck(candidate["origin"], old_origin_today, candidate["vehicle_internal_id"])
-                ledger.try_consume_truck(candidate["destination"], old_dest_today, candidate["vehicle_internal_id"])
-            return None
+        if ok_origin:
+            ledger.release_handling_timed(rental_d["origin"], origin_start, rental_d["outbound_handling_min"], candidate["carried_desi"])
+        if ok_hub:
+            ledger.release_handling_timed(hub_m, hub_start, rental_d["inbound_handling_min"], candidate["carried_desi"])
+        if ok_final:
+            ledger.release_handling_timed(final_dest, arrive2, inbound_final, candidate["carried_desi"])
+        # candidate'in eski tuketimini geri koy (bu aday reddedildi)
+        ledger.force_consume_handling(candidate["origin"], old_origin_today, candidate["carried_desi"])
+        ledger.force_consume_handling(candidate["destination"], old_dest_today, candidate["carried_desi"])
+        if candidate["vehicle_type"] == cfg.TRUCK_CAP_VEHICLE_TYPE:
+            ledger.try_consume_truck(candidate["origin"], old_origin_today, candidate["vehicle_internal_id"])
+            ledger.try_consume_truck(candidate["destination"], old_dest_today, candidate["vehicle_internal_id"])
+        return None
 
     leg2 = {
         "vehicle_internal_id": f"{candidate['vehicle_internal_id']}-PIGGY",
         "vehicle_class": "Spot", "vehicle_type": vt2,
         "origin": hub_m, "destination": final_dest,
-        "depart_at": depart2, "arrive_at": arrive2, "travel_hours": hours2,
+        "depart_at": depart2, "arrive_at": arrive2, "travel_hours": min2 / 60.0,
         "outbound_handling_min": reload_minutes,
         "inbound_handling_min": inbound_final,
         "delivered_at": new_delivered_at,

@@ -24,7 +24,7 @@ from state import CapacityLedger
 from portions import build_portion_pools, consume_fifo, available_desi, earliest_deadline
 from rental import build_rental_fleet, dispatch_rentals_for_day
 from spot_assign import solve_spot
-from costs import handling_duration_minutes, spot_cost
+from costs import handling_duration_minutes, spot_cost, travel_minutes, usage_hours
 
 
 def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs, ledger,
@@ -79,7 +79,10 @@ def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs
     if actual_batch <= 1e-9:
         return []
 
-    ledger.try_consume_handling(origin, today, actual_batch)
+    # cikis elleçlemesi: tum gunun sevk edilen yuku icin (aggregate), gece
+    # yarisini asarsa sureyle orantili bolunur.
+    aggregate_outbound_handling = handling_duration_minutes(actual_batch)
+    ledger.try_consume_handling_timed(origin, day_1700, aggregate_outbound_handling, actual_batch)
     consumed, _ = consume_fifo(pool, actual_batch, cutoff_time=day_1700)
 
     dispatches = []
@@ -89,20 +92,24 @@ def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs
         if count == 0:
             continue
         per_vehicle_load = loads[vt]
-        travel_hours = travel_hours_by_type[vt]
-        cost = spot_cost(vt, distance_km, travel_hours, vehicle_specs)
+        travel_hrs = travel_hours_by_type[vt]
+        travel_min = travel_minutes(travel_hrs)
 
         for _ in range(count):
             outbound_handling = handling_duration_minutes(per_vehicle_load)
             depart_at = day_1700 + pd.Timedelta(minutes=outbound_handling)
-            arrive_at = depart_at + pd.Timedelta(hours=travel_hours)
+            arrive_at = depart_at + pd.Timedelta(minutes=travel_min)
             inbound_handling = handling_duration_minutes(per_vehicle_load)
             arrival_day = arrive_at.normalize()
+
+            # Kullanim Suresi = cikis elleçleme + yolculuk + varis elleçleme
+            usage_hrs = usage_hours(outbound_handling, travel_min, inbound_handling)
+            cost = spot_cost(vt, distance_km, usage_hrs, vehicle_specs)
 
             if vt == cfg.TRUCK_CAP_VEHICLE_TYPE:
                 ledger.try_consume_truck(origin, today, f"S-{route}-{date.date()}-{v_no}")
                 ledger.try_consume_truck(destination, arrival_day, f"S-{route}-{date.date()}-{v_no}")
-            ledger.try_consume_handling(destination, arrival_day, per_vehicle_load)
+            ledger.try_consume_handling_timed(destination, arrive_at, inbound_handling, per_vehicle_load)
 
             vehicle_portions, remaining_consumed = _take_portions(remaining_consumed, per_vehicle_load)
 
@@ -116,7 +123,7 @@ def _dispatch_spot_for_wave(route, date, day_1700, pool, distance, vehicle_specs
                 "destination": destination,
                 "depart_at": depart_at,
                 "arrive_at": arrive_at,
-                "travel_hours": travel_hours,
+                "travel_hours": travel_min / 60.0,
                 "outbound_handling_min": outbound_handling,
                 "inbound_handling_min": inbound_handling,
                 "delivered_at": arrive_at + pd.Timedelta(minutes=inbound_handling),
