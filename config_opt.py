@@ -60,10 +60,15 @@ RENTAL_DEFAULT_HOUR = 9
 # anlamina gelir - SLA cezasi bu veri setinde (0.4 TL/desi/saat) arac
 # maliyetine kiyasla ucuz oldugundan, bu bilincli bir maliyet tercihi).
 # Degerler parametre taramasiyla (fill_threshold x safety_hours grid search)
-# bulundu - toplam maliyeti (arac + SLA cezasi) minimize eden nokta. Yeni
-# "Kullanim Suresi" maliyet modeli (elleçleme+bekleme dahil) sonrasi
-# yeniden taranip guncellendi (eski deger 0.65/-4 idi).
-MIN_FILL_THRESHOLD = 0.50
+# bulundu - toplam maliyeti (arac + SLA cezasi) minimize eden nokta. Milkrun'daki
+# eksik-release bugu (bkz. milkrun.py) duzeltildikten sonra milk-run gercekten
+# calismaya basladigi icin optimum nokta kaydi: dusuk-doluluk esigini daha da
+# dusurmek (0.50 -> 0.18) artik daha iyi sonuc veriyor, cunku eskiden "beklet,
+# doluluk artsin" tek konsolidasyon yoluyken artik ayni gun farkli hedeflere
+# giden ince yukler milk-run ile (SLA riski almadan) birlestirilebiliyor - bu
+# yuzden gun-bazli bekletmeye daha az ihtiyac var (eski deger 0.65/-4, sonra
+# 0.50/-2 idi).
+MIN_FILL_THRESHOLD = 0.18
 SLA_SAFETY_HOURS = -2
 
 # Rota bazinda SLA suresine (1 veya 2 gun) gore FARKLI guvenlik payi denendi
