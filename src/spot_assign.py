@@ -21,7 +21,7 @@ from pathlib import Path
 
 from pulp import LpProblem, LpMinimize, LpVariable, lpSum, value, PULP_CBC_CMD
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config_opt as cfg
 from costs import travel_minutes
 

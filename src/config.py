@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT_DIR / "outputs"
 
 DEMAND_FILE = ROOT_DIR / "teknofest26_gelismis.xlsx"

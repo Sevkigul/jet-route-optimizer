@@ -6,7 +6,7 @@ import numpy as np
 import lightgbm as lgb
 from catboost import CatBoostRegressor
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 from features import CATEGORICAL, FEATURES
 

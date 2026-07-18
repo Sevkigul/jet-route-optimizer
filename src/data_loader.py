@@ -1,91 +1,77 @@
-"""Veri yukleme modulu - 4 Excel dosyasini okur ve standart isimlerle dondurur."""
+"""Ham verilerin yuklenmesi ve standardizasyonu (Faz 1)."""
+import sys
 from pathlib import Path
+
 import pandas as pd
 
-RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
-
-# data/raw/ icindeki gercek dosya adlari
-FILES = {
-    "desi":      "Desi_talep.xlsx",
-    "koordinat": "Koordinatlar.xlsx",
-    "kiralik":   "Kiralik_Araclar.xlsx",
-    "arac":      "Arac_Kapasite_Maliyet.xlsx",
-}
-
-# Turkce sutun adlari -> kod dostu standart adlar
-RENAME = {
-    "desi": {
-        "Çıkış Transfer Merkezi": "origin",
-        "Varış Transfer Merkezi": "destination",
-        "Tarih": "date",
-        "Toplam Desi": "desi",
-    },
-    "koordinat": {
-        "Transfer Merkezi": "center",
-        "Enlem": "lat",
-        "Boylam": "lon",
-    },
-    "kiralik": {
-        "Çıkış Transfer Merkezi": "origin",
-        "Varış Transfer Merkezi": "destination",
-        "Araç sayısı": "vehicle_count",
-        "Araç Türü": "vehicle_type",
-    },
-    "arac": {
-        "Araç Adı": "vehicle_type",
-        "Kapasite (desi)": "capacity",
-        "Kiralık Araç Günlük Kira (TL)": "rental_daily_cost",
-        "Kiralık Araç Kilometre Başına Maliyet (TL)": "rental_km_cost",
-        "Spot Araç Sabit Günlük Maliyet (TL)": "spot_daily_cost",
-        "Spot Kilometre Başına Maliyet (TL)": "spot_km_cost",
-    },
-}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 
 
-def _clean_text(df):
-    """Metin sütunlarindaki bas/son boşluklari temizler."""
-    for col in df.columns:
-        if df[col].dtype == "object" or str(df[col].dtype).startswith("str"):
-            df[col] = df[col].astype(str).str.strip()
-    return df
+def _slot_code(raw):
+    return config.SLOT_MAP[raw]["code"]
 
 
-def load_data(raw_dir=RAW_DIR):
-    """4 Excel dosyasini yukler, standart sütun adlariyla dict döndürür."""
-    raw_dir = Path(raw_dir)
-    data = {}
-    for key, fname in FILES.items():
-        path = raw_dir / fname
-        if not path.exists():
-            raise FileNotFoundError(f"Dosya bulunamadi: {path}")
-        df = pd.read_excel(path).rename(columns=RENAME[key])
-        data[key] = _clean_text(df)
+def load_demand():
+    """teknofest26_gelismis.xlsx dosyasini yukler ve kolonlari standardize eder."""
+    df = pd.read_excel(config.DEMAND_FILE)
+    df = df.rename(columns={
+        "tarih": "date",
+        "cikis": "origin",
+        "varis": "destination",
+        "toplam_desi": "desi",
+        "talep_tamamlanma_saati": "slot_raw",
+    })
+    df["date"] = pd.to_datetime(df["date"])
+    df["slot"] = df["slot_raw"].map(_slot_code)
 
-    # Tarih sutununu datetime'a cevir
-    data["desi"]["date"] = pd.to_datetime(data["desi"]["date"])
-    return data
+    if df["slot"].isna().any():
+        bilinmeyen = df.loc[df["slot"].isna(), "slot_raw"].unique()
+        raise ValueError(f"Beklenmeyen slot degeri(leri): {bilinmeyen}")
+
+    return df[["date", "origin", "destination", "slot", "desi"]]
 
 
-def check_coverage(data):
-    """Desi ve Kiralik merkezlerinin Koordinatlar'da var olup olmadiğini kontrol eder."""
-    centers = set(data["koordinat"]["center"])
-    desi_centers = set(data["desi"]["origin"]) | set(data["desi"]["destination"])
-    kiralik_centers = set(data["kiralik"]["origin"]) | set(data["kiralik"]["destination"])
-    missing_desi = sorted(desi_centers - centers)
-    missing_kiralik = sorted(kiralik_centers - centers)
+def load_distance():
+    """sehirler_arasi_lojistik.xlsx dosyasini yukler (statik guzergah ozellikleri)."""
+    df = pd.read_excel(config.DISTANCE_FILE)
+    df = df.rename(columns={
+        "cikis": "origin",
+        "varis": "destination",
+        "mesafe_km": "mesafe_km",
+        "hedef_teslim_gun": "sla_gun",
+    })
+    keep = ["origin", "destination", "mesafe_km", "sla_gun"]
+    return df[keep].drop_duplicates(subset=["origin", "destination"])
 
-    if missing_desi:
-        print(f"UYARI - Desi'de olup Koordinatlar'da OLMAYAN: {missing_desi}")
-    if missing_kiralik:
-        print(f"UYARI - Kiralik'ta olup Koordinatlar'da OLMAYAN: {missing_kiralik}")
-    if not missing_desi and not missing_kiralik:
-        print("Tum merkezlerin koordinati mevcut.")
-    return missing_desi, missing_kiralik
+
+def load_data():
+    demand = load_demand()
+    distance = load_distance()
+    return {"demand": demand, "distance": distance}
+
+
+def _assert(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+
+
+def validate_demand(df):
+    """Yukleme sonrasi bilinen ground-truth sayilarla dogrulama."""
+    _assert(len(df) == 66024, f"satir sayisi beklenenden farkli: {len(df)}")
+    _assert(df["origin"].nunique() == 18, f"cikis TM sayisi beklenenden farkli: {df['origin'].nunique()}")
+    _assert(df["destination"].nunique() == 17, f"varis TM sayisi beklenenden farkli: {df['destination'].nunique()}")
+    _assert(df["date"].nunique() == 179, f"gun sayisi beklenenden farkli: {df['date'].nunique()}")
+    n_routes = df[["origin", "destination"]].drop_duplicates().shape[0]
+    _assert(n_routes == 289, f"guzergah sayisi beklenenden farkli: {n_routes}")
+    dupes = df.duplicated(subset=["date", "origin", "destination", "slot"]).sum()
+    _assert(dupes == 0, f"duplicate (date,route,slot) satiri var: {dupes}")
+    print(f"[data_loader] dogrulama OK: {len(df)} satir, {n_routes} guzergah, "
+          f"{df['date'].nunique()} gun, slot degerleri {sorted(df['slot'].unique())}")
 
 
 if __name__ == "__main__":
     data = load_data()
-    for key, df in data.items():
-        print(f"{key}: {df.shape}  sutunlar={list(df.columns)}")
-    print()
-    check_coverage(data)
+    validate_demand(data["demand"])
+    print("\ndistance ornegi:")
+    print(data["distance"].head())

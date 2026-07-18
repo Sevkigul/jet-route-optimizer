@@ -1,103 +1,85 @@
-"""Ozellik uretimi - panel dengeleme ve tahmin ozellikleri (Faz 2)."""
+"""Takvim + lag/rolling ozellik uretimi (Faz 2).
+
+(origin, destination, slot) bazinda gruplanir - 09:00 ve 17:00 ayri
+gunluk seriler olarak ele alinir. Bu, eski asamadaki (origin, destination)
+gruplamasindan tek farkli nokta.
+"""
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-# Veri kalitesi ve tahmin ufku sinirlari
-EGITIM_SON = pd.Timestamp("2026-05-09")        # guvenilir son egitim gunu
-BOZUK_GUN = pd.Timestamp("2026-05-10")         # eksik/kismi gun - kullanilmaz
-TAHMIN_BASLANGIC = pd.Timestamp("2026-05-11")
-TAHMIN_SON = pd.Timestamp("2026-05-17")
-
-# Sizinti (data leakage) onlemek icin tum gecikmeler >= 7 gun:
-# 11-17 Mayis tahmin edilirken t-1..t-6 verisi elde olmayacagi icin
-# en yakin gecikme 7 gun secildi (direct forecasting yaklasimi).
-LAG_GUNLER = [7, 14, 21]
-ROLLING_PENCERE = [7, 28]
-
-# 2026 resmi tatilleri (egitim donemi + cevresi); talep bu gunlerde belirgin duser
-RESMI_TATILLER = pd.to_datetime([
-    "2026-01-01",                              # yilbasi
-    "2026-03-20", "2026-03-21", "2026-03-22",  # Ramazan Bayrami
-    "2026-04-23",                              # Ulusal Egemenlik
-    "2026-05-01",                              # Emek ve Dayanisma
-    "2026-05-19",                              # Ataturk'u Anma
-])
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 
 
-def build_panel(data):
-    """Dengeli panel kurar: her guzergah x her gun tek satir.
+def add_features(panel, distance):
+    df = panel.sort_values(["origin", "destination", "slot", "date"]).copy()
 
-    - 1 Oca - 9 May : gercek veri; teslimat olmayan gun-guzergah = 0 (zero-fill)
-    - 10 May        : bozuk/eksik gun, desi = NaN (egitime girmez)
-    - 11-17 May     : tahmin hedefi, desi = NaN
-    Tarih ekseni kesintisiz tutulur; boylece gecikme hesabi takvimle hizali kalir.
-    """
-    desi = data["desi"][["origin", "destination", "date", "desi"]].copy()
-
-    rotalar = desi[["origin", "destination"]].drop_duplicates()
-    tarihler = pd.date_range(desi["date"].min(), TAHMIN_SON, freq="D")
-    izgara = rotalar.merge(pd.DataFrame({"date": tarihler}), how="cross")
-
-    panel = izgara.merge(desi, on=["origin", "destination", "date"], how="left")
-
-    # Zero-filling: gecmis gunlerdeki eksik = 0 desi (o gun teslimat yok)
-    gecmis = panel["date"] <= EGITIM_SON
-    panel.loc[gecmis, "desi"] = panel.loc[gecmis, "desi"].fillna(0.0)
-
-    # Bozuk gun (10 May): tum satirlar NaN -> egitime alinmaz
-    panel.loc[panel["date"] == BOZUK_GUN, "desi"] = np.nan
-
-    return panel.sort_values(["origin", "destination", "date"]).reset_index(drop=True)
-
-
-def add_features(panel):
-    """Panele takvim, gecikme (lag) ve hareketli ortalama ozellikleri ekler."""
-    df = panel.sort_values(["origin", "destination", "date"]).copy()
+    # --- Statik guzergah ozellikleri (mesafe, SLA gunu) ---
+    df = df.merge(distance, on=["origin", "destination"], how="left")
 
     # --- Takvim ozellikleri ---
     df["dayofweek"] = df["date"].dt.dayofweek
     df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
     df["month"] = df["date"].dt.month
     df["day"] = df["date"].dt.day
-    df["is_holiday"] = df["date"].isin(RESMI_TATILLER).astype(int)
+    df["is_holiday"] = df["date"].isin(config.OFFICIAL_HOLIDAYS).astype(int)
+    df["is_evening_slot"] = df["slot"]  # 0/1, zaten binary
 
-    # --- Gecikme ozellikleri (hepsi >= 7 gun, sizinti yok) ---
-    grup = df.groupby(["origin", "destination"])["desi"]
-    for g in LAG_GUNLER:
+    # --- Lag ozellikleri (MIN_LAG_DAYS tabanli, config'ten turetilmis) ---
+    grup = df.groupby(["origin", "destination", "slot"])["desi"]
+    for g in config.LAG_DAYS:
         df[f"lag_{g}"] = grup.shift(g)
 
-    # --- Hareketli ortalama / std (7 gun kaydirilmis seri uzerinden) ---
-    df["_shifted"] = grup.shift(7)
-    grup_s = df.groupby(["origin", "destination"])["_shifted"]
-    for p in ROLLING_PENCERE:
-        df[f"roll_mean_{p}"] = grup_s.transform(
-            lambda s: s.rolling(p, min_periods=1).mean()
-        )
-    df["roll_std_7"] = grup_s.transform(
-        lambda s: s.rolling(7, min_periods=1).std()
-    )
+    # --- Hareketli ortalama / std (MIN_LAG_DAYS kaydirilmis seri uzerinden) ---
+    df["_shifted"] = grup.shift(config.MIN_LAG_DAYS)
+    grup_s = df.groupby(["origin", "destination", "slot"])["_shifted"]
+    for p in config.ROLLING_WINDOWS:
+        df[f"roll_mean_{p}"] = grup_s.transform(lambda s: s.rolling(p, min_periods=1).mean())
+    df["roll_std_7"] = grup_s.transform(lambda s: s.rolling(7, min_periods=1).std())
     df = df.drop(columns="_shifted")
 
     return df.reset_index(drop=True)
 
 
+LAG_COLS = [f"lag_{g}" for g in config.LAG_DAYS]
+ROLL_COLS = [f"roll_mean_{p}" for p in config.ROLLING_WINDOWS] + ["roll_std_7"]
+CATEGORICAL = ["origin", "destination"]
+NUMERIC = (["dayofweek", "is_weekend", "month", "day", "is_holiday", "is_evening_slot",
+            "mesafe_km", "sla_gun"] + LAG_COLS + ROLL_COLS)
+FEATURES = CATEGORICAL + NUMERIC
+
+
+def _assert(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+
+
+def validate_features(feat):
+    hedef = feat[(feat["date"] >= config.TARGET_START) & (feat["date"] <= config.TARGET_END)]
+    for col in LAG_COLS:
+        n_nan = hedef[col].isna().sum()
+        _assert(n_nan == 0, f"hedef penceredeki {col} icin {n_nan} NaN var (leakage riski/eksik gecmis)")
+    print(f"[features] hedef pencerede lag kolonlarinda NaN yok ({len(LAG_COLS)} kolon kontrol edildi)")
+
+    tatil_gunleri = feat.loc[feat["is_holiday"] == 1, "date"].unique()
+    print(f"[features] is_holiday=1 olan gun sayisi: {len(tatil_gunleri)} (beklenen {len(config.OFFICIAL_HOLIDAYS)})")
+    _assert(len(tatil_gunleri) == len(config.OFFICIAL_HOLIDAYS), "tatil bayragi beklenen gun sayisiyla eslesmiyor")
+
+    egitim = feat[feat["desi"].notna()]
+    baslangic_disi_nan = egitim[LAG_COLS[0]].isna().sum()
+    print(f"[features] egitim setinde en kisa lag ({LAG_COLS[0]}) icin NaN sayisi (grup basi, beklenen): {baslangic_disi_nan}")
+
+
 if __name__ == "__main__":
     from data_loader import load_data
+    from panel import build_panel
 
     data = load_data()
     panel = build_panel(data)
-    print("Panel boyutu      :", panel.shape)
-    print("Tarih araligi     :", panel["date"].min().date(), "->",
-          panel["date"].max().date())
-    print("Guzergah sayisi   :",
-          panel[["origin", "destination"]].drop_duplicates().shape[0])
-
-    feat = add_features(panel)
-    print("\nOzellikli panel   :", feat.shape)
-    print("Sutunlar          :", list(feat.columns))
-
-    egitim = feat[feat["desi"].notna()]
-    tahmin = feat[(feat["date"] >= TAHMIN_BASLANGIC)
-                  & (feat["date"] <= TAHMIN_SON)]
-    print(f"\nEgitim satiri     : {len(egitim)}")
-    print(f"Tahmin satiri     : {len(tahmin)}  ({tahmin['date'].nunique()} gun)")
+    feat = add_features(panel, data["distance"])
+    print("Ozellikli panel:", feat.shape)
+    print("Kolonlar:", list(feat.columns))
+    validate_features(feat)

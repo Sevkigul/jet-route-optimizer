@@ -1,11 +1,16 @@
-# HepsiJET Anahat Lojistik Optimizasyonu
+# Teknofest HepsiJET — Gelişmiş Çözüm Aşaması
 
-Transfer merkezleri arası kargo taşımacılığında **11–17 Mayıs** haftası için
-talep tahmini ve maliyet-minimize araç planlaması.
+Transfer merkezleri arası kargo taşımacılığında **29 Haziran – 5 Temmuz 2026**
+haftası için talep tahmini ve maliyet-minimize araç/rota optimizasyonu.
 
 İki aşamalı çözüm:
-1. **Talep tahmini** — geçmiş veriyle her güzergahın günlük desi talebini öngörmek.
-2. **Araç optimizasyonu** — bu talebi kiralık ve spot araçlara en düşük maliyetle dağıtmak.
+1. **Talep tahmini** — geçmiş veriyle her güzergah × slot (09:00/17:00) için
+   günlük desi talebini öngörmek.
+2. **Araç/rota optimizasyonu** — bu talebi kiralık ve spot araçlara,
+   organizasyonun Soru-Cevap oturumunda netleştirdiği kurallara (kullanım
+   süresi = elleçleme+yolculuk+bekleme, dakikaya yukarı yuvarlama, gece
+   yarısı proransı, tır kapasitesi) tam uyumlu şekilde, en düşük maliyetle
+   dağıtmak.
 
 ---
 
@@ -17,7 +22,8 @@ pip install -r requirements.txt
 
 ## Çalıştırma
 
-4 veri dosyasını `data/raw/` klasörüne koyun. Tüm pipeline tek komutla çalışır:
+8 veri dosyasını proje kök dizinine koyun (bkz. `src/config.py` ve
+`src/config_opt.py`'deki dosya adları). Tüm pipeline tek komutla çalışır:
 
 ```bash
 python main.py
@@ -26,31 +32,47 @@ python main.py
 Adımları ayrı ayrı çalıştırmak isterseniz:
 
 ```bash
-python src/utils.py       # merkezler arası mesafe matrisi
-python src/forecast.py    # talep tahmini  -> outputs/talep_tahmini.xlsx
-python src/optimize.py    # araç planı     -> outputs/arac_plani.xlsx
+python -c "import sys; sys.path.insert(0,'src'); from main import run_forecast; run_forecast()"
+python -c "import sys; sys.path.insert(0,'src'); from main import run_optimization; run_optimization()"
 ```
 
-Çıktılar `outputs/` klasöründe oluşur.
+Çıktılar `outputs/` klasöründe oluşur: `talep_tahmini_gelismis.xlsx`,
+`tasima_plani_gelismis.xlsx`.
 
 ---
 
 ## Klasör yapısı
 
 ```
-├── data/
-│   ├── raw/          # 4 orijinal Excel (versiyon kontrolüne dahil değil)
-│   └── processed/    # mesafe_matrisi.csv (üretilir)
+├── data/                     # eski aşamadan kalan veri klasörü (bu pipeline kök dizindeki dosyaları kullanır)
 ├── notebooks/
-│   └── 01_eda.ipynb  # keşifsel veri analizi
+│   └── 01_eda.ipynb
 ├── src/
-│   ├── data_loader.py   # veri yükleme ve standartlaştırma
-│   ├── utils.py         # mesafe matrisi
-│   ├── features.py      # panel dengeleme ve özellik üretimi
-│   ├── forecast.py      # talep tahmin modeli
-│   └── optimize.py      # araç optimizasyonu
-├── outputs/          # teslim dosyaları (üretilir)
-├── main.py           # uçtan uca pipeline
+│   ├── config.py             # talep tahmini ayarları
+│   ├── data_loader.py        # veri yükleme ve standartlaştırma
+│   ├── panel.py               # güzergah x gün x slot panel dengeleme
+│   ├── features.py            # özellik üretimi (lag, mevsimsellik, tatil)
+│   ├── model.py                # LightGBM + CatBoost Tweedie topluluğu
+│   ├── validate.py             # çoklu-katman backtest
+│   ├── output.py               # Talep Tahmini şablonuna dönüşüm
+│   │
+│   ├── config_opt.py         # optimizasyon ayarları
+│   ├── data_loader_opt.py    # veri yükleme + çapraz doğrulama
+│   ├── state.py                # CapacityLedger (elleçleme/tır kapasitesi, hub x gün)
+│   ├── costs.py                 # kullanım süresi / maliyet / SLA cezası formülleri
+│   ├── portions.py              # talep portion havuzları (FIFO)
+│   ├── rental.py                 # zorunlu kiralık araç sevkiyatı
+│   ├── spot_assign.py            # rota-dalga bazlı spot araç MIP'i
+│   ├── scheduler.py              # ana orkestrasyon (Faz A)
+│   ├── milkrun.py                 # çok-duraklı uğrama (Faz F, Clarke-Wright)
+│   ├── consolidation.py           # tek-sevkiyat reroute (Faz B)
+│   ├── hub_merge.py                # aynı-hedef çoklu-sevkiyat birleştirme (Faz C)
+│   ├── hub_split.py                # aynı-çıkış çoklu-sevkiyat bölme (Faz D)
+│   ├── rental_piggyback.py         # kiralık boş kapasite kullanımı (Faz E)
+│   └── output_opt.py               # Taşıma Planı şablonuna dönüşüm + doğrulama
+│
+├── outputs/                  # teslim dosyaları (üretilir)
+├── main.py                   # uçtan uca pipeline
 ├── requirements.txt
 └── README.md
 ```
@@ -61,86 +83,69 @@ python src/optimize.py    # araç planı     -> outputs/arac_plani.xlsx
 
 ### Talep tahmini
 
-Geçmiş 130 günlük (1 Ocak 2026 – 10 Mayis 2026) güzergah-gün bazlı desi verisiyle
-**LightGBM + CatBoost** ikilisi eğitilir; iki modelin ortalaması 11–17 Mayıs
-için günlük tahmini üretir (iki bağımsız kütüphanenin harmanı, hata
-çeşitliliğini azaltarak tüm doğrulama katmanlarında tekil modellerden daha
-iyi sonuç vermiştir).
+Geçmiş güzergah-gün-slot bazlı desi verisiyle **LightGBM + CatBoost** (Tweedie
+hedef fonksiyonu) topluluğu eğitilir. Panel her güzergah × slot × gün için
+tam dengelenir (teslimat olmayan satırlar `0 desi`), sızıntı önlemek için
+tüm lag özellikleri tahmin ufkundan uzun tutulur, resmi tatiller (Kurban
+Bayramı dahil) takvime işlenir. Çoklu-katman backtest ile doğrulanır.
 
-Öne çıkan tasarım kararları:
+Çıktı (`talep_tahmini_gelismis.xlsx`): `Talep ID | Tarih | Talep Tamamlama
+Saati | Çıkış TM | Varış TM | Tahmin Edilen Desi` — 289 güzergah × 7 gün ×
+2 slot = 4046 satır, hiçbiri atılmaz.
 
-- **Panel dengeleme:** Her güzergah × her gün için tam tablo kurulur; teslimat
-  olmayan gün-güzergahlar `0 desi` ile doldurulur (sıfır talep, eksik veri değil).
-- **Sızıntısız özellikler:** Tahmin haftasında yakın geçmiş bulunmayacağından
-  tüm gecikme (lag) özellikleri en az 7 günlüktür.
-- **Tweedie hedef fonksiyonu:** Sıfır-yoğun ve sağa çarpık talep dağılımı
-  LightGBM'in `tweedie` objective'i ile modellenir; log dönüşümlü
-  regresyonun yarattığı sistematik eksik tahmin sapması (gerçek haftalık
-  hacmin ~%26 altı) bu sayede giderilmiştir.
-- **Resmi tatil özelliği:** 23 Nisan, 1 Mayıs gibi tatillerde talep belirgin
-  düştüğünden takvime tatil işareti eklenmiştir; doğrulama hatasını en çok
-  düşüren tek değişiklik budur.
-- **Doğrulama:** Tek pencere yanıltıcı olabildiğinden model 3 ayrı zaman-katmanında
-  test edilmiştir. Ortalama **WMAPE ≈ %26** (katmanlar: 22.5 / 37.0 / 19.4).
-  Tahmin başarısı değerlendirme kriterlerinden biri olduğundan kasıtlı
-  düşük/yüksek tahminden kaçınılmış; son doğrulama haftasında model,
-  gerçekleşen toplam hacmi %11 sapmayla yakalamaktadır.
+### Araç/rota optimizasyonu
 
-Çıktı formatı (`talep_tahmini.xlsx`): `Tarih | Çıkış TM | Varış TM | Tahmin Edilen Desi`
+Kademeli (decomposition) bir mimari — tek dev MILP yerine, paylaşımlı bir
+elleçleme/tır kapasite defteri (`CapacityLedger`) üzerinde sırayla çalışan
+6 faz:
 
-### Araç optimizasyonu
+1. **Zamanlama (Faz A):** kiralık araçlar önce (zorunlu, sabit hat), kalan
+   yük rota-dalga bazlı küçük bir MIP ile spot araçlara atanır. Düşük
+   hacimli rotalarda, SLA riski yoksa, birkaç günlük talep biriktirilip
+   daha dolu tek araçla gönderilir.
+2. **Milk-run (Faz F):** aynı gün farklı hedeflere giden ince yükler
+   Clarke-Wright tasarruf algoritmasıyla tek (çok duraklı) araca birleştirilir.
+3. **Konsolidasyon (Faz B):** tek bir düşük-dolu sevkiyat için ara merkez
+   üzerinden daha ucuz bir alternatif aranır.
+4. **Hub-birleştirme (Faz C) / Hub-bölme (Faz D):** farklı kökenli/aynı
+   hedefli ya da aynı kökenli/farklı hedefli düşük-dolu sevkiyatlar ortak
+   bir ara merkezde birleştirilir.
+5. **Kiralık boş kapasite (Faz E):** zorunlu kiralık araçların boş
+   kapasitesine, aynı çıkıştan giden başka bir yük bindirilir.
 
-Tahmin edilen talep, her gün her güzergah için doğrudan (konsolidasyonsuz)
-araçlara atanır:
+Maliyet formülü organizasyonun Soru-Cevap netleştirmesine göredir: Kullanım
+Süresi = çıkış elleçleme + yolculuk + varış elleçleme (+bekleme), tüm
+süreler dakikaya yukarı yuvarlanır, elleçleme kapasitesi gece yarısını
+aşan işlemlerde süreyle orantılı bölünür. Tır kapasitesi kiralık araçları
+da kapsar. SLA cezası = geciken desi × geciken saat (yukarı yuvarlı) ×
+0,4 TL.
 
-- **Kiralık filo zorunlu ve önceliklidir:** Tanımlı kiralık araçlar, doluluk
-  oranından bağımsız olarak her gün yola çıkar; kira + km maliyetleri her
-  koşulda toplam maliyete dahildir.
-- Kiralık kapasiteyi aşan yük, 4 araç tipi (Tır, Kamyon, Hafif Kamyon,
-  Kamyonet) üzerinden **tamsayılı programlama (MIP)** ile en ucuz **spot**
-  kombinasyonuna atanır. Çözücü: PuLP / CBC.
-- **Minimum doluluk kısıtı:** Spot araçlar yalnızca kapasitelerinin en az
-  %10'u dolu olacaksa plana eklenir (kiralık araçlar bu kısıttan muaftır).
-- **Uğrama (multi-stop):** Yol üstündeki bir merkezin yükü, rotası uygun bir
-  spot araca bindirilir (yük araçta kalır, aktarma yapılmaz — konsolidasyon
-  değildir). Araç başına en fazla bir uğrama yapılır, sapma doğrudan
-  mesafenin %15'ini aşamaz ve kapasite/doluluk kısıtları korunur. Yalnızca
-  net tasarruf sağlayan birleşmeler uygulanır.
-- Araç dönüşleri kapsam dışıdır; plan tek yönlüdür ve her gün bağımsız
-  değerlendirilir.
-- Maliyet = günlük sabit + km × mesafe (kuş uçuşu / Haversine).
-
-Çıktı formatı (`arac_plani.xlsx`): her satır tek bir araç ataması —
-`Tarih | Araç Tipi | Çıkış TM | Varış TM | Atanan Desi | Maliyet | Uğrama`
-(Uğrama sütunu yalnızca uğrama yapan araçlarda doludur; ek bilgi niteliğindedir.)
+Çıktı (`tasima_plani_gelismis.xlsx`): şablonla birebir eşleşen 16 kolon,
+şema ve desi-korunum kontrolünden geçmiş.
 
 ---
 
 ## Sonuç
 
-11–17 Mayıs haftası için bulunan maliyet (kiralık kira + km ve spot
-günlük + km dahil):
+29 Haziran – 5 Temmuz 2026 haftası için bulunan maliyet:
 
 | Bileşen | Tutar (TL) |
 |---|---|
-| Kiralık filo (kira + km) | 802.744 |
-| Spot araçlar | 8.730.674 |
-| **Toplam maliyet** | **9.533.417** |
+| Kiralık maliyet | 399.159 |
+| Spot maliyet | 12.784.635 |
+| SLA cezası | 1.149.834 |
+| **Toplam maliyet** | **14.333.627** |
 
 ---
 
 ## Notlar ve kapsam
 
-- Bu teslimde **konsolidasyon kapsam dışıdır**: yükler ara merkezde
-  indirilip birleştirilmez. Serbest bırakılan **uğrama** (multi-stop) ise
-  kullanılmıştır; uğramada yük aynı araçta kalır ve araç son varışına devam
-  eder. `optimize.py` içindeki `UGRAMA_AKTIF = False` ile bu katman
-  kapatılabilir (kapalıyken toplam maliyet 10.879.942 TL'dir).
-- Mesafeler Haversine (kuş uçuşu) ile hesaplanmıştır.
-- Tahmin için XGBoost da denenmiş; doğrulamada LightGBM ve CatBoost'un
-  gerisinde kaldığından nihai harmana (ensemble) bu iki model alınmıştır.
-- SLA cezası, TM kapasiteleri, sefer süreleri ve şoför kısıtları bu aşamada
-  veri setinde tanımlı olmadığından modele dahil edilmemiştir.
-- İleri aşama hedefleri (stokastik optimizasyon, konsolidasyon, belirsizlik
-  modellemesi) ön tasarım raporunda yer almakta olup bu teslimin kapsamı
-  dışındadır.
+- Bu pipeline, önceki aşamanın (`11–17 Mayıs`, Haversine mesafe, günlük
+  sabit maliyet) kod tabanının yerini almıştır — kurallar (kullanım süresi,
+  kapasite defterleri, SLA cezası) bu aşamada organizasyonun resmi
+  netleştirmelerine göre yeniden tasarlanmıştır.
+- Boş spot araçların dönüşü modellenmez/maliyetlenmez (kural: zorunlu
+  değil, döndürülmez). Kiralık araçlarda dönüş yoktur.
+- Optimizasyon için bir zaman sınırlaması yoktur — tahmin penceresinin
+  sonunda hâlâ kapasite kısıtından dolayı gönderilemeyen yük, hedef
+  pencere dışında (SLA cezasıyla) teslim edilebilir.

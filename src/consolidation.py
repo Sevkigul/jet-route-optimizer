@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config_opt as cfg
 from costs import (handling_duration_minutes, spot_cost, delay_hours_ceiled, sla_penalty,
                     travel_minutes, usage_hours)
