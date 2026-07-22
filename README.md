@@ -145,34 +145,28 @@ tüm kontroller **0 hata** ile geçti.
 
 ## Sonuç: 14.012.440 TL genel maliyet, sıfır SLA cezası
 
-29 Haziran – 5 Temmuz tahmin dönemi için üretilen plan, tüm kısıtları
-ihlalsiz karşılar. Önce üç mimari karşılaştırıldı, ardından seçilen milk-run
-mimarisi üç adımda iyileştirildi; her satır tam veri setinde ölçüldü:
+29 Haziran – 5 Temmuz tahmin dönemi için üretilen plan tüm kısıtları
+ihlalsiz karşılar; bağımsız doğrulayıcı **0 hata** verir, çalışma süresi
+~40 saniyedir (limit 10 dk).
 
-| Mimari | Genel toplam | SLA cezası | Medyan doluluk |
-|---|---:|---:|---:|
-| v1: Direkt sevkiyat (uğrama yok) | 49.658.242 TL | 8.410 TL | %4.6 |
-| v2: Hub-and-spoke konsolidasyon | 28.889.623 TL | 1.355.008 TL | — |
-| v3: Milk-run | 13.900.582 TL | 138.013 TL | %82.4 |
-| v3 + tahmin veri temizliği | 14.132.146 TL | 140.016 TL | %83.3 |
-| v3 + SLA-uyumlu rotalama | 14.138.592 TL | 0 TL | %79.8 |
-| **v3 + yerel arama cilası (güncel)** | **14.012.440 TL** | **0 TL** | **%82.1** |
+| Metrik | Değer |
+|---|---:|
+| Genel maliyet | **14.012.440 TL** |
+| SLA cezası | **0 TL** |
+| Desi başına maliyet | 2.185 TL |
+| Medyan doluluk | %82.1 |
+| Tahmin hatası (WMAPE) | %21.4 |
 
-v3, v1'e göre **%72**, v2'ye göre **%52** daha düşük maliyetli. Analizin
-tam gerekçesi için `notebooks/eda_talep_analizi.ipynb`'ye bakınız.
+**Neden milk-run?** Direkt sevkiyat (49,7M TL, doluluk %4.6) ve hub-and-spoke
+konsolidasyon (28,9M TL) mimarileri de kurulup ölçüldü; milk-run bunlardan
+sırasıyla **%72** ve **%52** daha ucuz. Mimari karşılaştırması, adım adım
+iyileştirmeler ve reddedilen denemeler dahil tüm karar gerekçeleri
+`notebooks/eda_talep_analizi.ipynb`'de.
 
-Not 1: tahmin veri temizliği toplam maliyeti ~%1.7 artırdı çünkü eski tahmin,
-bayram/kısmi günlerin sahte sıfırları yüzünden talebi sistematik düşük
-gösteriyordu. Maliyet kendi tahminimiz üzerinden hesaplansa da değerlendirme
-gerçek talebe ve tahmin isabetine göre yapılıyor; kasıtlı düşük tahminle
-maliyet düşürmek MVP'de reddedilen bir tuzaktır (dürüst tahmin ilkesi).
-
-Not 2: SLA-uyumlu rotalama, cezanın tamamını (140.016 TL) net +6.446 TL
-karşılığında sıfırladı — km-odaklı uzun rotaların geciktirdiği durakların
-tamamı, rota birleştirme aşamasında teslim tarihi denetimiyle önlendi.
-Cezaların kök neden analizi, cezalı parçaların tamamının direkt sevkiyatla
-zamanında yetişebileceğini göstermişti; yani ceza "kaçınılmaz" değil,
-rotalama kör noktasıydı.
+Sonuca yön veren iki ilke: **(1)** tahmin kasıtlı düşük tutulmadı —
+değerlendirme gerçek talebe göre yapıldığından dürüst tahmin esastır;
+**(2)** SLA cezası maliyet düşürme kaldıracı olarak kullanılmadı, teslim
+tarihine duyarlı rotalama ile sıfırlandı.
 
 ## Bilinen varsayımlar
 
