@@ -143,9 +143,11 @@ desi mutabakatı (tahmin = teslim edilen), elleçleme/tır kapasite aşımı,
 kiralık kuralları, maliyet mutabakatı (bağımsız yeniden hesap). Son koşuda
 tüm kontroller **0 hata** ile geçti.
 
-## Sonuçlar (7 gün, 29.06–05.07.2026)
+## Sonuç: 14.012.440 TL genel maliyet, sıfır SLA cezası
 
-Üç farklı mimari denendi, tam veri setinde ölçüldü:
+29 Haziran – 5 Temmuz tahmin dönemi için üretilen plan, tüm kısıtları
+ihlalsiz karşılar. Önce üç mimari karşılaştırıldı, ardından seçilen milk-run
+mimarisi üç adımda iyileştirildi; her satır tam veri setinde ölçüldü:
 
 | Mimari | Genel toplam | SLA cezası | Medyan doluluk |
 |---|---:|---:|---:|
