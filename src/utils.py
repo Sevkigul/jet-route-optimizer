@@ -1,64 +1,59 @@
-"""Yardimci fonksiyonlar - koordinat tablosu ve mesafe matrisi üretimi."""
-from pathlib import Path
-import numpy as np
-import pandas as pd
+"""Zaman ve yuvarlama hesaplamaları için merkezi, saf fonksiyonlar.
 
-PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
+optimizer.py ve vehicle_costing.py bu fonksiyonları kullanır; kendi
+yuvarlama/gün-bölme mantıklarını tekrar yazmazlar.
+"""
+from __future__ import annotations
 
-# Koordinatlar.xlsx (v2) artik tüm merkezleri içeriyor; Kocaeli resmi olarak eklendi.
-# Yine de ileride bir merkez eksik kalirsa elle tamamlamak için bu sözlük durur.
-EKSIK_KOORDINAT = {}
+import math
+from datetime import date, datetime, timedelta
 
-
-def get_coordinates(data):
-    """Koordinat tablosunu döner; eksik merkez varsa EKSIK_KOORDINAT'tan tamamlar."""
-    coords = data["koordinat"].copy()
-    mevcut = set(coords["center"])
-    eklenecek = [
-        {"center": m, "lat": lat, "lon": lon}
-        for m, (lat, lon) in EKSIK_KOORDINAT.items()
-        if m not in mevcut
-    ]
-    if eklenecek:
-        coords = pd.concat([coords, pd.DataFrame(eklenecek)], ignore_index=True)
-        print(f"Koordinata elle eklendi: {[e['center'] for e in eklenecek]}")
-    return coords
+from . import config
 
 
-def haversine(lat1, lon1, lat2, lon2):
-    """İki nokta arasi büyük-çember mesafesi (km)."""
-    R = 6371.0  # Dünya yariçapi (km)
-    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    return R * 2 * np.arcsin(np.sqrt(a))
+def ellecleme_dakika(desi: float) -> int:
+    """desi * 0.01 dk/desi, dakikaya YUKARI yuvarlanmış."""
+    if desi <= 0:
+        return 0
+    return math.ceil(desi * config.ELLECLEME_DK_PER_DESI)
 
 
-def build_distance_matrix(coords, save=True):
-    """Tüm merkez çiftleri arasi mesafe matrisi (km) üretir."""
-    centers = coords["center"].tolist()
-    lat = coords.set_index("center")["lat"]
-    lon = coords.set_index("center")["lon"]
-    mat = pd.DataFrame(index=centers, columns=centers, dtype=float)
-    for i in centers:
-        for j in centers:
-            mat.loc[i, j] = 0.0 if i == j else haversine(
-                lat[i], lon[i], lat[j], lon[j]
-            )
-    if save:
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        out = PROCESSED_DIR / "mesafe_matrisi.csv"
-        mat.to_csv(out, encoding="utf-8-sig")
-        print(f"Mesafe matrisi kaydedildi: {out}")
-    return mat
+def saat_yukari_yuvarla_dk(saat: float) -> int:
+    """Ondalık saat (yol süresi) -> yukarı yuvarlanmış tam dakika."""
+    return math.ceil(saat * 60)
 
 
-if __name__ == "__main__":
-    from data_loader import load_data
+def dk_to_saat(dakika: float) -> float:
+    return dakika / 60.0
 
-    data = load_data()
-    coords = get_coordinates(data)
-    mat = build_distance_matrix(coords)
-    print(f"\nMesafe matrisi boyutu: {mat.shape}")
-    print("Örnek (ilk 5x5, km):")
-    print(mat.iloc[:5, :5].round(1))
+
+def zaman_ekle(baslangic: datetime, dakika: float) -> datetime:
+    return baslangic + timedelta(minutes=dakika)
+
+
+def gun_gun_dagit(baslangic: datetime, sure_dk: int) -> list[tuple[date, int]]:
+    """(baslangic, baslangic+sure_dk) aralığını takvim günlerine böler.
+
+    Örn: 23:30 başlayıp 100dk süren işlem -> [(gün1, 30), (gün2, 70)].
+    sure_dk=0 ise boş liste döner (elleçlenecek bir şey yok demektir).
+    """
+    parcalar: list[tuple[date, int]] = []
+    kalan = sure_dk
+    an = baslangic
+    while kalan > 0:
+        gun_sonu = datetime.combine(an.date() + timedelta(days=1), datetime.min.time())
+        bu_gun_dk = min(kalan, int((gun_sonu - an).total_seconds() // 60))
+        if bu_gun_dk <= 0:
+            # an tam gece yarısındaysa bir sonraki tam güne geç
+            an = gun_sonu
+            gun_sonu = datetime.combine(an.date() + timedelta(days=1), datetime.min.time())
+            bu_gun_dk = min(kalan, int((gun_sonu - an).total_seconds() // 60))
+        parcalar.append((an.date(), bu_gun_dk))
+        kalan -= bu_gun_dk
+        an = gun_sonu
+    return parcalar
+
+
+def saat_str_to_time(saat_str: str) -> tuple[int, int]:
+    hh, mm = saat_str.split(":")
+    return int(hh), int(mm)

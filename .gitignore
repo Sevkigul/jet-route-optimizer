@@ -1,20 +1,11 @@
-# Veri ve ciktilar
-data/raw/*
-data/processed/*
-outputs/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!outputs/.gitkeep
-
-# Python
-__pycache__/
-*.py[cod]
-.ipynb_checkpoints/
-venv/
 .venv/
-env/
-
-# Isletim sistemi / editor
+venv/
+__pycache__/
+*.pyc
 .DS_Store
-.vscode/
-.idea/
+
+# Yarisma verisi ve uretilen ciktilar repoya konmaz (organizator verisi / teslim dosyalari)
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
