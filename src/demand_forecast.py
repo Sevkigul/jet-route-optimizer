@@ -19,8 +19,7 @@ Bileşen 2 — sağlam mevsimsel lag topluluğu (`_lag_ensemble_forecast`)
 Nihai tahmin = BLEND_WEIGHT * bileşen1 + (1 - BLEND_WEIGHT) * bileşen2.
 İki yöntem farklı hatalar yaptığından harman ikisinden de düşük WMAPE verir
 (3 pencereli backtest: ağırlıklı %21.37, lag-topluluğu %23.27, harman (0.85)
-%21.09 — scripts/backtest_forecast.py). Hiç veri görülmemiş hat için tahmin
-üretilmez. MVP'deki LightGBM+CatBoost ensemble mantığının devamı.
+%21.09). Hiç veri görülmemiş hat için tahmin üretilmez.
 """
 from __future__ import annotations
 
@@ -29,7 +28,7 @@ import pandas as pd
 
 from . import config
 
-HALFLIFE_WEEKS_DEFAULT = 3.0  # backtest ile doğrulandı: scripts/backtest_forecast.py
+HALFLIFE_WEEKS_DEFAULT = 3.0  # 3 pencereli backtest ile doğrulandı (notebook §3)
 VERI_BASLANGIC = pd.Timestamp("2026-01-01")
 VERI_BITIS = pd.Timestamp("2026-06-28")
 
@@ -40,11 +39,9 @@ BLEND_WEIGHT = 0.85  # nihai = 0.85*agirlikli + 0.15*lag-toplulugu. Bu, WMAPE
 # SIFIR tutan en yuksek harman agirligidir (0.80'den itibaren ceza doguyor).
 
 # --- Veri kalitesi: egitime alinmayan gunler ---
-# MVP'deki "10 Mayis bozuk gun disari" kararinin devami (bkz. main branch
-# src/features.py BOZUK_GUN). Zero-fill takvimi bu gunleri sahte "0 talep"
-# gozlemine cevirdigi icin sadece satir filtrelemek yetmez; gunler takvim
-# izgarasindan tamamen cikarilir. Secim keyfi degil, 3 pencereli backtest ile
-# dogrulandi: scripts/backtest_forecast.py
+# Zero-fill takvimi bu gunleri sahte "0 talep" gozlemine cevirdigi icin sadece
+# satir filtrelemek yetmez; gunler takvim izgarasindan tamamen cikarilir.
+# Secim 3 pencereli backtest ile dogrulandi (notebook §3).
 KISMI_GUNLER = [pd.Timestamp("2026-06-28")]  # kismi gun: 47 satir (normal gun ~370)
 TATIL_ANOMALI_GUNLER = list(pd.date_range("2026-05-26", "2026-06-01"))
 # 26 Mayis arife (yarim gun, 193K desi) + 27-31 Mayis Kurban Bayrami (talep

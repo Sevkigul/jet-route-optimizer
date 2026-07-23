@@ -40,9 +40,6 @@ src/
   optimizer.py             ana motor (kiralık + peel + SLA-uyumlu milk-run + biriktirme)
   output_writer.py         şablon uyumlu Excel çıktı yazıcıları
   dogrulama.py             bağımsız kural-uyum ve özet-metrik doğrulayıcısı
-scripts/
-  backtest_forecast.py     tahmin metodolojisi kanıtı (3 pencereli backtest)
-  test_kiralik_zorunlulugu.py  kiralık kuralı regresyon testi (4 senaryo)
 notebooks/
   eda_talep_analizi.ipynb  talep deseni analizi ve yöntem kararlarının gerekçesi
 outputs/                 üretilen Talep-tahmini.xlsx ve Tasima-plani.xlsx
@@ -64,29 +61,25 @@ Yöntem: iki bağımsız tahmincinin **harmanı** (ensemble):
 
 Nihai tahmin `0.85·bileşen1 + 0.15·bileşen2`. İki yöntem farklı hatalar
 yaptığından harman ikisinden de düşük WMAPE verir; ağırlık 0.85, WMAPE
-kazancını korurken optimizasyonda SLA cezasını sıfırda tutan en yüksek
-değerdir (MVP'deki LightGBM+CatBoost ensemble mantığının devamı).
+kazancını korurken optimizasyonda SLA cezasını sıfırda tutan en yüksek değerdir.
 
-**Veri temizliği:** kısmi gün 28 Haziran (47 satır, normal gün ~370; MVP'deki
-10 Mayıs kararının devamı) ile 26 Mayıs – 1 Haziran Kurban Bayramı anomalisi
-(arife yarım günü, ~sıfır talepli bayram günleri ve 1 Haziran'daki 2.64M
-desilik telafi patlaması) eğitim dışıdır. Hedef haftada tatil olmadığı için
-bu günler haftalık ortalamada sistematik yanlılık yaratıyordu (Pazartesi ~%6
-şişkin, Çarşamba–Cumartesi ~%9 düşük).
+**Veri temizliği:** kısmi gün 28 Haziran (47 satır, normal gün ~370) ile
+26 Mayıs – 1 Haziran Kurban Bayramı anomalisi (arife yarım günü, ~sıfır talepli
+bayram günleri ve 1 Haziran'daki 2.64M desilik telafi patlaması) eğitim dışıdır.
+Hedef haftada tatil olmadığı için bu günler haftalık ortalamada sistematik
+yanlılık yaratıyordu (Pazartesi ~%6 şişkin, Çarşamba–Cumartesi ~%9 düşük).
 
-Yarı ömür (3 hafta), hariç tutulan gün seti ve harman ağırlığı MVP'nin "tek
-pencere yanıltır" dersine uygun olarak **3 ayrı temiz haftada** backtest ile
-seçildi (`scripts/backtest_forecast.py`): temizlik olmadan %23.11, temizlikle
-%21.37, harmanla (0.85) **%21.09**. Yarı ömürde 3 ile 4 hafta pratikte eşit
-(%21.37 / %21.35); harman ağırlığında 0.85 sıfır-ceza sınırındaki en düşük
-WMAPE'dir (0.80'den itibaren optimizasyonda ceza doğuyor).
+Yarı ömür (3 hafta), hariç tutulan gün seti ve harman ağırlığı **3 ayrı temiz
+haftada** backtest ile seçildi: temizlik olmadan %23.11, temizlikle %21.37,
+harmanla (0.85) %21.09. Yarı ömürde 3 ile 4 hafta pratikte eşit (%21.37 /
+%21.35); harman ağırlığında 0.85 sıfır-ceza sınırındaki en düşük WMAPE'dir
+(0.80'den itibaren optimizasyonda ceza doğuyor).
 
-**GBM ile karşılaştırma:** MVP'nin LightGBM konfigürasyonu (tweedie 1.25,
-lag≥7 özellikleri) aynı 3 pencerede iki varyantla denendi ve **kaybetti**
-(ort. WMAPE %30.6 ve %26.5; harman bile %24.7). Kısa seri geçmişi + bayram
-deliği GBM'in lag'lerini bozarken, güçlü haftalık sezonluk elle kurulmuş
-tahmincileri favori kılıyor — ayrıntı ve tablo için
-`notebooks/eda_talep_analizi.ipynb` §3.
+**GBM ile karşılaştırma:** LightGBM (tweedie 1.25, lag≥7 özellikleri) aynı
+3 pencerede iki varyantla denendi ve kaybetti (ort. WMAPE %30.6 ve %26.5;
+harman bile %24.7). Kısa seri geçmişi + bayram deliği GBM'in lag'lerini
+bozarken, güçlü haftalık sezonluk elle kurulmuş tahmincileri favori kılıyor —
+ayrıntı ve tablo için `notebooks/eda_talep_analizi.ipynb` §3.
 
 Sadece geçmiş veride görülen 289 hat için, her gün × 2 slot (09:00/17:00)
 bazında bir satır üretilir (29 Haziran 09:00 – 5 Temmuz 17:00), düşük
