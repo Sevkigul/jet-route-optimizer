@@ -90,6 +90,34 @@ def main() -> None:
         skorlar = [pencere_wmape(daily, b, s, kazanan, hl) for b, s in PENCERELER]
         print(f"halflife={hl:<4}" + "".join(f"  P{i+1}={sk:6.2f}" for i, sk in enumerate(skorlar)) + f"   ORT={np.mean(skorlar):6.2f}")
 
+    print("\n=== 3) Harman agirligi taramasi (agirlikli x lag-toplulugu) ===")
+    print("nihai = w*agirlikli + (1-w)*lag-toplulugu; ceza sinari uretim kosusunda")
+    print(f"{'w (agirlikli)':<16}  P1     P2     P3    ORT")
+    for w in (1.00, 0.90, 0.85, 0.80, 0.70, 0.00):
+        skorlar = [_harman_wmape(daily, talep, b, s, w) for b, s in PENCERELER]
+        etiket = "  <- saf agirlikli" if w == 1.0 else ("  <- saf lag-top." if w == 0.0 else
+                 ("  <- URETIM (ceza 0)" if w == 0.85 else ""))
+        print(f"{w:<16.2f}" + "".join(f"  {sk:5.2f}" for sk in skorlar) + f"  {np.mean(skorlar):5.2f}{etiket}")
+
+
+def _harman_wmape(daily, talep, bas, son, w):
+    """w*agirlikli + (1-w)*lag-toplulugu harmaninin pencere WMAPE'si."""
+    egitim = daily[(daily["tarih"] < bas) & (~daily["tarih"].isin(HARIC_URETIM))]
+    hedefler = list(pd.date_range(bas, son, freq="D"))
+    agir = fc._weighted_weekday_forecast(egitim, hedefler, 3.0, referans=bas - pd.Timedelta(days=1))
+    lagt = fc._lag_ensemble_forecast(talep[talep["tarih"] < bas], hedefler)
+    m = (daily[(daily["tarih"] >= bas) & (daily["tarih"] <= son)]
+         .merge(agir.rename(columns={"tahmin": "a"}), on=KEY, how="left")
+         .merge(lagt.rename(columns={"tahmin": "l"}), on=KEY, how="left"))
+    m["a"] = m["a"].fillna(0.0)
+    m["l"] = m["l"].fillna(m["a"])
+    pred = (w * m["a"] + (1 - w) * m["l"]).clip(lower=0).values
+    return wmape(m["toplam_desi"].values, pred)
+
+
+KEY = ["cikis", "varis", "talep_tamamlanma_saati", "tarih"]
+HARIC_URETIM = set(fc.HARIC_GUNLER)
+
 
 if __name__ == "__main__":
     main()

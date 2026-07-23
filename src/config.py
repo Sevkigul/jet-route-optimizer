@@ -41,7 +41,10 @@ TIR_KAPASITE_KISITLI_TIP = "Tır"  # sadece bu tip için TM tır kapasitesi geç
 # --- v3: Milk-run (çok duraklı uğrama) + zamansal biriktirme ---
 # (v2'nin hub-and-spoke sabitleri kaldırıldı - referans çözüm karşılaştırması
 # sonrası çift elleçleme sorunu nedeniyle milk-run mimarisiyle değiştirildi)
-MILKRUN_MAX_STOPS = 12  # tek milk-run rotasındaki azami durak sayısı
-MILKRUN_THIN_ESIK_DESI = 22400.0  # bunun altındaki hat-gün talebi "ince" sayılır (çok-günlü havuzlama adayı)
+# (max_stops, thin_esik) ikilisi SLA-uyumlu rotalama eklendikten sonra yeniden
+# tarandı: 16/16000, SLA cezası SIFIR iken en düşük maliyeti veriyor
+# (13.97M vs 12/22400'ün 14.01M'i; daha uzun rota + biraz daha az havuzlama).
+MILKRUN_MAX_STOPS = 16  # tek milk-run rotasındaki azami durak sayısı
+MILKRUN_THIN_ESIK_DESI = 16000.0  # bunun altındaki hat-gün talebi "ince" sayılır (çok-günlü havuzlama adayı)
 MULTIDAY_POOL = True  # kapatılırsa maliyet +83K TL ve ceza doğar (deneyle ölçüldü)
 MULTIDAY_SLA_GUVENLIK_SAAT = 6  # deneyle doğrulandı: 4/2/0 saat hem cezayı hem maliyeti artırıyor

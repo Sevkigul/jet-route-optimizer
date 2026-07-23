@@ -7,6 +7,7 @@ kurallarını sıfırdan uygular. `main.py` bunu pipeline'ın son adımı olarak
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 
@@ -188,6 +189,37 @@ def verify(plan: pd.DataFrame, forecast: pd.DataFrame, veri: dict) -> tuple[str,
                 yaz(f"  UYUŞMUYOR: {arac_id} beklenen={beklenen_toplam:.2f} gerçek={gercek_toplam:.2f}")
     yaz(f"Maliyeti uyuşmayan Araç ID sayısı: {tutarsiz_arac} / {plan['Araç ID'].nunique()}")
     if tutarsiz_arac > 0:
+        hata_sayisi += 1
+
+    yaz("\n=== A8: SLA doğruluğu (gecikme bağımsızca yeniden hesaplanır) ===")
+    # "SLA cezası" kolonuna güvenmeden: her son-durak (orijinal varış TM'sine
+    # ulaşan) satır için deadline'ı forecast'ten, tamamlanma anını Varış
+    # Saati/Tarihi + Varış elleçleme süresinden yeniden kurup karşılaştırır.
+    forecast_idx = forecast.set_index("talep_id")
+    gecikme_sayisi, yeniden_ceza, kontrol = 0, 0.0, 0
+    for _, row in plan_bos_olmayan.iterrows():
+        kok = row["kok"]
+        if kok not in forecast_idx.index:
+            continue
+        frow = forecast_idx.loc[kok]
+        if row["Varış Transfer Merkezi"] != frow["varis"]:
+            continue  # son durak değil, bu satır bu talep için karar anı değil
+        kontrol += 1
+        hh, mm = (int(x) for x in str(frow["talep_tamamlanma_saati"]).split(":"))
+        hazir = datetime(pd.Timestamp(frow["tarih"]).year, pd.Timestamp(frow["tarih"]).month,
+                         pd.Timestamp(frow["tarih"]).day, hh, mm)
+        sla_gun = mesafe_idx.loc[(frow["cikis"], frow["varis"]), "sla_gun"]
+        deadline = hazir + pd.Timedelta(hours=float(sla_gun) * 24)
+        tamamlanma = _leg_dt(row["Varış Tarihi"], row["Varış Saati"]) + \
+            pd.Timedelta(minutes=float(row["Varış elleçleme süresi"]))
+        if tamamlanma > deadline:
+            gecikme_sayisi += 1
+            gecikme_saat = math.ceil((tamamlanma - deadline).total_seconds() / 3600)
+            yeniden_ceza += row["Taşınan Desi"] * gecikme_saat * config.SLA_CEZA_TL_PER_DESI_PER_SAAT
+    yaz(f"Kontrol edilen son-durak satırı: {kontrol}, bağımsızca gecikmiş: {gecikme_sayisi}")
+    yaz(f"Bağımsız SLA cezası: {yeniden_ceza:,.2f} TL (kayıtlı: {plan['SLA cezası'].sum():,.2f} TL)")
+    if abs(yeniden_ceza - plan["SLA cezası"].sum()) > max(1.0, 0.01 * max(yeniden_ceza, 1.0)):
+        yaz("  UYUŞMUYOR: kayıtlı SLA cezası bağımsız hesapla eşleşmiyor")
         hata_sayisi += 1
 
     yaz("\n" + "=" * 60)

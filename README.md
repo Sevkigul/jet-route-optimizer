@@ -50,9 +50,22 @@ outputs/                 üretilen Talep-tahmini.xlsx ve Tasima-plani.xlsx
 
 ## 1. Talep tahmini (`src/demand_forecast.py`)
 
-Yöntem: her (çıkış TM, varış TM, talep tamamlanma saati) için, haftanın
-gününe göre **üstel azalan ağırlıklı ortalama** (son haftalara daha fazla
-ağırlık — veri Ocak ayında bir "ramp-up" gösteriyor, bkz. `notebooks/`).
+Yöntem: iki bağımsız tahmincinin **harmanı** (ensemble):
+
+- **Bileşen 1 — ağırlıklı hafta-günü ortalaması:** her (çıkış TM, varış TM,
+  saat) için haftanın gününe göre üstel azalan ağırlıklı ortalama (son
+  haftalara daha fazla ağırlık — veri Ocak'ta "ramp-up" gösteriyor). Haftalık
+  mevsimsel yapıyı güçlü yakalar.
+- **Bileşen 2 — sağlam mevsimsel lag topluluğu:** her hücre için son 4 haftanın
+  aynı-gün değeri (lag 7/14/21/28); tahmin `0.5·(min atılmış ortalama) +
+  0.5·(medyan)` — min atma bayram çukurunu, medyan ani sıçramayı yumuşatır.
+  Güncel seviyeyi (trend) daha iyi yakalar. Ufuk ≤ 7 gün olduğundan tüm lag'ler
+  gözlemli veridir (sızıntı yok).
+
+Nihai tahmin `0.85·bileşen1 + 0.15·bileşen2`. İki yöntem farklı hatalar
+yaptığından harman ikisinden de düşük WMAPE verir; ağırlık 0.85, WMAPE
+kazancını korurken optimizasyonda SLA cezasını sıfırda tutan en yüksek
+değerdir (MVP'deki LightGBM+CatBoost ensemble mantığının devamı).
 
 **Veri temizliği:** kısmi gün 28 Haziran (47 satır, normal gün ~370; MVP'deki
 10 Mayıs kararının devamı) ile 26 Mayıs – 1 Haziran Kurban Bayramı anomalisi
@@ -61,18 +74,18 @@ desilik telafi patlaması) eğitim dışıdır. Hedef haftada tatil olmadığı 
 bu günler haftalık ortalamada sistematik yanlılık yaratıyordu (Pazartesi ~%6
 şişkin, Çarşamba–Cumartesi ~%9 düşük).
 
-Yarı ömür (3 hafta) ve hariç tutulan gün seti, MVP'nin "tek pencere yanıltır"
-dersine uygun olarak **3 ayrı temiz haftada** backtest ile seçildi
-(`scripts/backtest_forecast.py`): ortalama WMAPE, temizlik olmadan %23.11,
-temizlikle **%21.37**. Yarı ömür taramasında 3 ile 4 hafta pratikte eşit
-çıktı (%21.37 / %21.35); kanıt farkı gürültü düzeyinde olduğundan mevcut
-3 hafta korundu.
+Yarı ömür (3 hafta), hariç tutulan gün seti ve harman ağırlığı MVP'nin "tek
+pencere yanıltır" dersine uygun olarak **3 ayrı temiz haftada** backtest ile
+seçildi (`scripts/backtest_forecast.py`): temizlik olmadan %23.11, temizlikle
+%21.37, harmanla (0.85) **%21.09**. Yarı ömürde 3 ile 4 hafta pratikte eşit
+(%21.37 / %21.35); harman ağırlığında 0.85 sıfır-ceza sınırındaki en düşük
+WMAPE'dir (0.80'den itibaren optimizasyonda ceza doğuyor).
 
 **GBM ile karşılaştırma:** MVP'nin LightGBM konfigürasyonu (tweedie 1.25,
 lag≥7 özellikleri) aynı 3 pencerede iki varyantla denendi ve **kaybetti**
-(ort. WMAPE %30.6 ve %26.5 vs mevcut %21.4; harman bile %24.7). Kısa seri
-geçmişi + bayram deliği GBM'in lag'lerini bozarken, güçlü haftalık sezonluk
-gün-koşullu ağırlıklı ortalamayı favori kılıyor — ayrıntı ve tablo için
+(ort. WMAPE %30.6 ve %26.5; harman bile %24.7). Kısa seri geçmişi + bayram
+deliği GBM'in lag'lerini bozarken, güçlü haftalık sezonluk elle kurulmuş
+tahmincileri favori kılıyor — ayrıntı ve tablo için
 `notebooks/eda_talep_analizi.ipynb` §3.
 
 Sadece geçmiş veride görülen 289 hat için, her gün × 2 slot (09:00/17:00)
@@ -140,22 +153,27 @@ payıyla (deadline'a en az 6 saat kala durarak) bir sonraki güne biriktirilir
 `main.py`'nin son adımı, ürettiği planı **sıfırdan, kendi iç durumuna
 bakmadan** yeniden kontrol eder: kolon şeması, Araç ID/Talep ID formatı,
 desi mutabakatı (tahmin = teslim edilen), elleçleme/tır kapasite aşımı,
-kiralık kuralları, maliyet mutabakatı (bağımsız yeniden hesap). Son koşuda
-tüm kontroller **0 hata** ile geçti.
+kiralık kuralları, maliyet mutabakatı (bağımsız yeniden hesap) ve SLA
+doğruluğu (her teslimatın gecikmesi zaman damgalarından yeniden hesaplanır).
+Son koşuda tüm kontroller **0 hata** ile geçti.
 
-## Sonuç: 14.012.440 TL genel maliyet, sıfır SLA cezası
+## Sonuç: 14.112.471 TL genel maliyet, sıfır SLA cezası
 
 29 Haziran – 5 Temmuz tahmin dönemi için üretilen plan tüm kısıtları
 ihlalsiz karşılar; bağımsız doğrulayıcı **0 hata** verir, çalışma süresi
-~40 saniyedir (limit 10 dk).
+~35 saniyedir (limit 10 dk).
 
 | Metrik | Değer |
 |---|---:|
-| Genel maliyet | **14.012.440 TL** |
+| Genel maliyet | **14.112.471 TL** |
 | SLA cezası | **0 TL** |
-| Desi başına maliyet | 2.185 TL |
-| Medyan doluluk | %82.1 |
-| Tahmin hatası (WMAPE) | %21.4 |
+| Desi başına maliyet | 2.173 TL |
+| Medyan doluluk | %82.0 |
+| Tahmin hatası (WMAPE) | %21.1 |
+
+(Genel maliyet, taşınan tahmini talebe orantılıdır; farklı tahminler farklı
+hacim taşıdığından adil kıyas **desi başına maliyettir**. Harman tahmini
+talebi %1.2 büyütürken birim maliyeti düşürmüştür.)
 
 **Neden milk-run?** Direkt sevkiyat (49,7M TL, doluluk %4.6) ve hub-and-spoke
 konsolidasyon (28,9M TL) mimarileri de kurulup ölçüldü; milk-run bunlardan
